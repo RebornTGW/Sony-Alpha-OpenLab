@@ -399,10 +399,13 @@ no extra dependency.
 **Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose
 `GetObjectHandles`; it places the last captured image on the special Sony handle
 **`0xFFFFC001`**, which `--download-dir` reads after each shot via `GetObject`. The
-26 MP buffer isn't ready instantly, so the tool **polls `0xFFFFC001` for up to ~3 s**.
-To make this robust even if the menu is on "Camera only", the tool also sends
-`SetContentsTransferMode (0x9212)` during connect to route images to the PC handle
-(disable with `--no-pc-transfer`). Setting the camera's **Save Destination to
+26 MP buffer isn't ready instantly: each poll calls **`GetObjectInfo (0x1008)` first**
+(the body only sizes the object once asked) and fetches only when its size > 0, for
+up to ~3 s. The saved file keeps its real extension from `GetObjectInfo` — **JPEG or
+RAW `.ARW`** (not just `FF D8`). To route images even if the menu is on "Camera only",
+the tool sends `SetContentsTransferMode (0x9212)` during connect (disable with
+`--no-pc-transfer`; try `--xfer-mode 2` if mode 1 doesn't route). Use `--verbose` to
+see per-poll response codes and sizes. Setting the camera's **Save Destination to
 "PC+Camera" or "PC only"** is still the most reliable.
 
 **Offline stacking.** `--stack-dir DIR --stack OUT` (without `--confirm-session-write`)

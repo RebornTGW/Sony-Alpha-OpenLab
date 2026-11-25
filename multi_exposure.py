@@ -59,6 +59,9 @@ CTRL_S2_BUTTON = 0xD2C2
 BTN_PRESS = 0x0002
 BTN_RELEASE = 0x0001
 
+# Verbose poll diagnostics (set from --verbose in main).
+VERBOSE = False
+
 # Standard PTP read-only object ops (for optional image download).
 OP_GET_OBJECT_HANDLES = 0x1007
 OP_GET_OBJECT_INFO = 0x1008
@@ -144,27 +147,70 @@ def capture_one(dev, af=True, af_delay=0.4, hold=0.12):
                         send_data=_u16(BTN_RELEASE))
 
 
+def parse_objectinfo(data: bytes):
+    """Parse a PTP ObjectInfo dataset. Returns {format, size, filename}."""
+    try:
+        fmt = struct.unpack_from("<H", data, 4)[0]
+        size = struct.unpack_from("<I", data, 8)[0]
+        fname = ""
+        if len(data) > 56:  # Filename PTP string starts at offset 56
+            n = data[56]
+            if n:
+                fname = data[57:57 + n * 2].decode("utf-16-le", "replace").rstrip("\x00")
+        return {"format": fmt, "size": size, "filename": fname}
+    except (struct.error, IndexError):
+        return {"format": 0, "size": 0, "filename": ""}
+
+
+def _ext_for(fname, fmt, data):
+    """Pick a file extension from the ObjectInfo filename/format, then the bytes."""
+    if fname and "." in fname:
+        return "." + fname.rsplit(".", 1)[1].lower()
+    if fmt == 0x3801 or data[:2] == b"\xff\xd8":
+        return ".jpg"
+    if data[:4] in (b"II*\x00", b"MM\x00*"):  # TIFF/Sony ARW container
+        return ".arw"
+    return ".bin"
+
+
 def fetch_pc_save_object(dev, out_dir, index, retries=12, delay=0.25):
     """After a capture in PC Remote mode, pull the image the camera placed on the
-    special Sony PC-save handle (0xFFFFC001). The full-res (26 MP) buffer is not
-    ready instantly, so poll 0xFFFFC001 up to `retries` times, `delay` s apart
-    (default 12 x 0.25 s = 3 s max). Read-only GetObject; returns the saved path
-    or None."""
+    special Sony PC-save handle (0xFFFFC001).
+
+    BIONZ XR: the body does not prepare/size the object until GetObjectInfo(0x1008)
+    is queried, so each poll calls GetObjectInfo first and only fetches once its
+    ObjectCompressedSize > 0. The file may be JPEG or RAW (.ARW), so the extension
+    comes from ObjectInfo (filename/format), not just the FF D8 magic."""
     for attempt in range(1, retries + 1):
         try:
-            rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_PC_SAVE_HANDLE])
+            rc_i, info = dev.transaction(OP_GET_OBJECT_INFO, params=[SONY_PC_SAVE_HANDLE])
         except PtpError:
-            rc, data = None, b""
-        if rc == PTP_RC_OK and data and data[:2] == b"\xff\xd8":
-            os.makedirs(out_dir, exist_ok=True)
-            path = os.path.join(out_dir, f"frame_{index:03d}.jpg")
-            with open(path, "wb") as f:
-                f.write(data)
-            print(f"         saved frame {index} -> {path} "
-                  f"({len(data)} bytes, after {attempt} poll(s))")
-            return path
+            rc_i, info = None, b""
+        oi = parse_objectinfo(info) if (rc_i == PTP_RC_OK and info) else \
+            {"format": 0, "size": 0, "filename": ""}
+        if VERBOSE:
+            print(f"         poll {attempt:2d}: GetObjectInfo rc={rc_str(rc_i) if rc_i is not None else 'ERR'} "
+                  f"size={oi['size']} fmt=0x{oi['format']:04X} name={oi['filename']!r}")
+        if rc_i == PTP_RC_OK and oi["size"] > 0:
+            try:
+                rc_o, data = dev.transaction(OP_GET_OBJECT, params=[SONY_PC_SAVE_HANDLE])
+            except PtpError:
+                rc_o, data = None, b""
+            if VERBOSE:
+                print(f"         poll {attempt:2d}: GetObject     "
+                      f"rc={rc_str(rc_o) if rc_o is not None else 'ERR'} bytes={len(data)}")
+            if rc_o == PTP_RC_OK and data:
+                os.makedirs(out_dir, exist_ok=True)
+                ext = _ext_for(oi["filename"], oi["format"], data)
+                path = os.path.join(out_dir, f"frame_{index:03d}{ext}")
+                with open(path, "wb") as f:
+                    f.write(data)
+                print(f"         saved frame {index} -> {path} "
+                      f"({len(data)} bytes, after {attempt} poll(s))")
+                return path
         time.sleep(delay)
-    print(f"         (image not ready on 0xFFFFC001 after {retries} polls)")
+    print(f"         (image not ready on 0xFFFFC001 after {retries} polls; "
+          "try --verbose, --xfer-mode 2, or Save Destination = PC)")
     return None
 
 
@@ -480,9 +526,17 @@ def main():
                     help="Live-overlay opacity of the live feed over frame 1 (0..1).")
     ap.add_argument("--no-pc-transfer", action="store_true",
                     help="Do NOT send SetContentsTransferMode (0x9212) during connect "
-                         "(by default it is sent when --download-dir is used, to route "
-                         "images to 0xFFFFC001 regardless of the Save Destination menu).")
+                         "(by default it is sent when downloading, to route images to "
+                         "0xFFFFC001 regardless of the Save Destination menu).")
+    ap.add_argument("--xfer-mode", type=int, choices=(1, 2), default=1,
+                    help="param1 for SetContentsTransferMode (0x9212); try 2 if 1 "
+                         "does not route images to 0xFFFFC001 (default 1).")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="Print per-poll GetObjectInfo/GetObject response codes and "
+                         "sizes when fetching from 0xFFFFC001.")
     args = ap.parse_args()
+    global VERBOSE
+    VERBOSE = args.verbose
 
     # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
     # it runs directly, no --confirm-session-write needed.
@@ -516,7 +570,7 @@ def main():
         # unless disabled. Avoids "no image" when Save Destination = Camera only.
         needs_download = (args.download_dir or args.interactive or args.live_overlay)
         if needs_download and not args.no_pc_transfer:
-            enable_pc_content_transfer(dev)
+            enable_pc_content_transfer(dev, mode=args.xfer_mode)
             time.sleep(0.2)
         if args.drive_value is not None:
             set_drive_mode(dev, args.drive_value)
