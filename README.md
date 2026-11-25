@@ -404,6 +404,8 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ## 📚 Documentation
 
+- [`docs/ROADMAP.en.md`](docs/ROADMAP.en.md) (EN) / [`docs/ROADMAP.md`](docs/ROADMAP.md) (FR)
+  — milestones done and next steps (portability, Open Gate study, more bodies).
 - [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN) / [`docs/RESULTS.md`](docs/RESULTS.md) (FR)
   — **experimental results** validated live on the A6700 (multi-exposure success,
   HAITA 3:2 lock).

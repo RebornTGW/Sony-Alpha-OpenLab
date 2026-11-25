@@ -419,6 +419,8 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ## 📚 Documentation
 
+- [`docs/ROADMAP.md`](docs/ROADMAP.md) (FR) / [`docs/ROADMAP.en.md`](docs/ROADMAP.en.md) (EN)
+  — jalons accomplis et prochaines étapes (portabilité, étude Open Gate, autres boîtiers).
 - [`docs/RESULTS.md`](docs/RESULTS.md) (FR) / [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN)
   — **résultats expérimentaux** validés en direct sur l'A6700 (succès
   multi-exposition, verrou HAITA 3:2).
