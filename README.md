@@ -362,14 +362,13 @@ multi-exposure blend, or lighten = star-trail style). It also requires
 # 5 frames, 1s apart (AF before each shot)
 python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
 
-# Continuous/bracket drive mode, no AF, then pull the new frames over PTP and
+# Continuous/bracket drive mode, no AF, auto-download each frame (0xFFFFC001) and
 # stack them into a single multi-exposure image
 python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
     --download-dir out/ --stack out/multi.png --stack-mode average
 
-# Star-trail style stack from a folder you copied off the SD card
-python multi_exposure.py --confirm-session-write --shots 1 \
-    --stack-dir ./frames --stack trails.png --stack-mode lighten
+# OFFLINE: stack a folder (no camera, no --confirm-session-write needed)
+python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
 ```
 
 | Option | Purpose |
@@ -377,12 +376,17 @@ python multi_exposure.py --confirm-session-write --shots 1 \
 | `--shots N` / `--interval S` | capture N frames, S seconds apart |
 | `--no-af` | skip the S1 (AF) half-press; S2 full-press only |
 | `--drive-value V` | set `still_capture_mode` (0x5013) first (continuous/bracket enum value) |
-| `--download-dir DIR` | pull the newly captured objects over PTP (read-only `GetObject`) |
+| `--download-dir DIR` | auto-download each frame via the Sony PC-save handle `0xFFFFC001` (read-only `GetObject`) |
 | `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | stack images (`average` or `lighten`) |
 
-Stacking needs Pillow + numpy (`pip install pillow numpy`); without them, capture
-still works and you can stack the SD-card files yourself. Image download over PTP is
-best-effort (if the body doesn't enumerate objects in this mode, copy from the card).
+**Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose
+`GetObjectHandles`; it places the last captured image on the special Sony handle
+**`0xFFFFC001`**, which `--download-dir` reads after each shot via `GetObject`. Set the
+camera's **Save Destination to "PC+Camera" or "PC only"** for this to work.
+
+**Offline stacking.** `--stack-dir DIR --stack OUT` (without `--confirm-session-write`)
+stacks images from a folder **without touching the camera** — e.g. frames you copied
+off the SD card. Requires Pillow + numpy (`pip install pillow numpy`).
 
 ---
 

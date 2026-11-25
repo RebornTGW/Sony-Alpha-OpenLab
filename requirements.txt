@@ -1,7 +1,6 @@
 pyusb>=1.2.1
 libusb-package>=1.0.26.1
 
-# Optional: only needed for image stacking in multi_exposure.py (--stack).
-# Install with: pip install pillow numpy
-# pillow>=10.0.0
-# numpy>=1.24.0
+# Image stacking in multi_exposure.py (--stack). Capture works without them.
+pillow>=10.0.0
+numpy>=1.26.0

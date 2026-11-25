@@ -63,6 +63,12 @@ OP_GET_OBJECT_HANDLES = 0x1007
 OP_GET_OBJECT_INFO = 0x1008
 OP_GET_OBJECT = 0x1009
 
+# In PC Remote mode the A6700 does not expose GetObjectHandles; it instead places
+# the last captured image on this special Sony "PC save" object handle, readable
+# via GetObjectInfo / GetObject. Requires "Save Destination: PC+Camera" or "PC only"
+# on the camera.
+SONY_PC_SAVE_HANDLE = 0xFFFFC001
+
 
 def _u16(v: int) -> bytes:
     return struct.pack("<H", v & 0xFFFF)
@@ -115,14 +121,45 @@ def capture_one(dev, af=True, af_delay=0.4, hold=0.12):
                         send_data=_u16(BTN_RELEASE))
 
 
-def capture_sequence(dev, shots: int, interval: float, af: bool):
+def fetch_pc_save_object(dev, out_dir, index):
+    """After a capture in PC Remote mode, pull the image the camera placed on the
+    special Sony PC-save handle (0xFFFFC001). Read-only GetObject; returns the saved
+    path or None."""
+    try:
+        rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_PC_SAVE_HANDLE])
+    except PtpError:
+        return None
+    if rc != PTP_RC_OK or not data:
+        return None
+    os.makedirs(out_dir, exist_ok=True)
+    ext = ".jpg" if data[:2] == b"\xff\xd8" else ".bin"
+    path = os.path.join(out_dir, f"frame_{index:03d}{ext}")
+    with open(path, "wb") as f:
+        f.write(data)
+    print(f"         saved frame {index} -> {path} ({len(data)} bytes)")
+    return path
+
+
+def capture_sequence(dev, shots: int, interval: float, af: bool, download_dir=None):
     print(f"[shoot ] {shots} frame(s), interval {interval:.2f}s, AF={'on' if af else 'off'}")
+    if download_dir:
+        print("         (auto-download via Sony handle 0xFFFFC001 - set the camera's "
+              "'Save Destination' to 'PC+Camera' or 'PC only')")
+    saved = []
     for i in range(1, shots + 1):
         capture_one(dev, af=af)
         print(f"         frame {i}/{shots} triggered")
+        if download_dir:
+            time.sleep(0.4)  # let the body publish the image on 0xFFFFC001
+            p = fetch_pc_save_object(dev, download_dir, i)
+            if p:
+                saved.append(p)
+            else:
+                print("         (no image on 0xFFFFC001 - check Save Destination)")
         if i < shots:
             time.sleep(interval)
     print("[shoot ] sequence complete")
+    return saved
 
 
 # ---------------------------------------------------------------------------
@@ -241,8 +278,9 @@ def main():
                     help="Optional value to write into still_capture_mode (0x5013) "
                          "first (e.g. a continuous/bracket enum value from probe [5]).")
     ap.add_argument("--download-dir", default=None,
-                    help="After capture, pull the NEW objects over PTP into this "
-                         "directory (read-only GetObject; best-effort).")
+                    help="Auto-download each captured frame via the Sony PC-save "
+                         "handle 0xFFFFC001 into this directory (read-only GetObject). "
+                         "Set the camera's 'Save Destination' to 'PC+Camera' or 'PC only'.")
     ap.add_argument("--stack", default=None, metavar="OUT.png",
                     help="Stack images into this output file.")
     ap.add_argument("--stack-dir", default=None,
@@ -252,10 +290,20 @@ def main():
                     help="average = multi-exposure blend; lighten = max (star trails).")
     args = ap.parse_args()
 
+    # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
+    # it runs directly, no --confirm-session-write needed.
     if not args.confirm_session_write:
-        sys.exit("[REFUSED] This script triggers REAL captures on the camera.\n"
-                 "Re-run with --confirm-session-write to acknowledge. For read-only\n"
-                 "diagnostics use probe_a6700.py instead.")
+        if args.stack_dir and args.stack:
+            print("=== multi_exposure: OFFLINE stacking (no camera) ===")
+            paths = sorted(glob.glob(os.path.join(args.stack_dir, "*")))
+            if not paths:
+                sys.exit(f"[INFO] no images found in {args.stack_dir}")
+            ok = stack_images(paths, args.stack, mode=args.stack_mode)
+            sys.exit(0 if ok else 1)
+        sys.exit("[REFUSED] Capturing triggers REAL pictures on the camera.\n"
+                 "Re-run with --confirm-session-write to acknowledge, or run offline\n"
+                 "stacking only with --stack-dir DIR --stack OUT (no camera, no flag).\n"
+                 "For read-only diagnostics use probe_a6700.py instead.")
     if args.shots < 1:
         sys.exit("[INFO] --shots must be >= 1.")
 
@@ -273,21 +321,12 @@ def main():
             set_drive_mode(dev, args.drive_value)
             time.sleep(0.2)
 
-        before = list_object_handles(dev) if args.download_dir else None
-
-        capture_sequence(dev, args.shots, args.interval, af=not args.no_af)
-        time.sleep(0.5)
-
-        downloaded = []
-        if args.download_dir:
-            after = list_object_handles(dev)
-            if before is None or after is None:
-                print("[dl    ] object enumeration unavailable over PTP here; "
-                      "copy the files from the SD card instead.")
-            else:
-                new = after - before
-                print(f"[dl    ] {len(new)} new object(s) detected.")
-                downloaded = download_objects(dev, new, args.download_dir)
+        # Capture, auto-downloading each frame from the Sony PC-save handle
+        # (0xFFFFC001) when --download-dir is set.
+        downloaded = capture_sequence(dev, args.shots, args.interval,
+                                      af=not args.no_af,
+                                      download_dir=args.download_dir)
+        time.sleep(0.3)
 
         if args.stack:
             src_dir = args.stack_dir or args.download_dir

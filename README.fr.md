@@ -375,14 +375,13 @@ fusion multi-exposition classique, ou lighten = filé d'étoiles). Il exige auss
 # 5 vues, 1 s d'intervalle (AF avant chaque prise)
 python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
 
-# Mode drive continu/bracket, sans AF, puis récupération PTP des nouvelles vues et
-# empilement en une seule image de multi-exposition
+# Mode drive continu/bracket, sans AF, téléchargement auto de chaque vue (0xFFFFC001)
+# et empilement en une seule image de multi-exposition
 python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
     --download-dir out/ --stack out/multi.png --stack-mode average
 
-# Empilement type filé d'étoiles depuis un dossier copié de la carte SD
-python multi_exposure.py --confirm-session-write --shots 1 \
-    --stack-dir ./frames --stack trails.png --stack-mode lighten
+# HORS-LIGNE : empiler un dossier (sans boîtier, sans --confirm-session-write)
+python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
 ```
 
 | Option | Rôle |
@@ -390,13 +389,18 @@ python multi_exposure.py --confirm-session-write --shots 1 \
 | `--shots N` / `--interval S` | capture N vues, espacées de S secondes |
 | `--no-af` | saute le demi-appui S1 (AF) ; S2 pleine pression seulement |
 | `--drive-value V` | règle `still_capture_mode` (0x5013) d'abord (valeur d'énum continu/bracket) |
-| `--download-dir DIR` | récupère les objets nouvellement capturés via PTP (`GetObject`, lecture seule) |
+| `--download-dir DIR` | télécharge auto chaque vue via le handle Sony `0xFFFFC001` (`GetObject`, lecture seule) |
 | `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | empile les images (`average` ou `lighten`) |
 
-L'empilement nécessite Pillow + numpy (`pip install pillow numpy`) ; sans eux, la
-capture fonctionne quand même et vous empilez les fichiers de la carte vous-même. Le
-téléchargement PTP est best-effort (si le boîtier n'énumère pas les objets dans ce
-mode, copiez depuis la carte).
+**Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
+`GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial
+**`0xFFFFC001`**, que `--download-dir` lit après chaque prise via `GetObject`. Réglez
+la **Destination d'enregistrement sur « PC + Caméra » ou « PC seul »** pour que cela
+fonctionne.
+
+**Empilement hors-ligne.** `--stack-dir DIR --stack OUT` (sans
+`--confirm-session-write`) empile les images d'un dossier **sans toucher au boîtier** —
+ex. des vues copiées de la carte SD. Nécessite Pillow + numpy (`pip install pillow numpy`).
 
 ---
 
