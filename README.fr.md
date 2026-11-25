@@ -419,6 +419,9 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ## 📚 Documentation
 
+- [`docs/RESULTS.md`](docs/RESULTS.md) (FR) / [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN)
+  — **résultats expérimentaux** validés en direct sur l'A6700 (succès
+  multi-exposition, verrou HAITA 3:2).
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (FR) / [`docs/PROTOCOL.en.md`](docs/PROTOCOL.en.md) (EN)
   — architecture du protocole PTP / « SDIO ».
 - [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) (FR) /

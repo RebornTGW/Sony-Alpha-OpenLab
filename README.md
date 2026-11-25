@@ -404,6 +404,9 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ## 📚 Documentation
 
+- [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN) / [`docs/RESULTS.md`](docs/RESULTS.md) (FR)
+  — **experimental results** validated live on the A6700 (multi-exposure success,
+  HAITA 3:2 lock).
 - [`docs/PROTOCOL.en.md`](docs/PROTOCOL.en.md) (EN) / [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (FR)
   — PTP / "SDIO" protocol architecture.
 - [`docs/DEVICE_PROPERTIES.en.md`](docs/DEVICE_PROPERTIES.en.md) (EN) /
