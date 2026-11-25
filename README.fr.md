@@ -168,31 +168,42 @@ python probe_a6700.py
 python probe_a6700.py --no-sdio
 
 # Forcer un PID USB précis
-python probe_a6700.py --pid 0x0DE7
+# (A6700 en mode PC Remote = 0x0E78, confirmé sur firmware 2.00)
+python probe_a6700.py --pid 0x0E78
 ```
 
-### Sortie attendue (exemple)
+> 📌 **PID A6700 connu :** `0x0E78` en mode USB **PC Remote** (confirmé en direct sur
+> firmware **2.00**). Le PID diffère selon le mode de connexion USB et le boîtier.
+
+### Sortie attendue (exemple, A6700 firmware 2.00)
 
 ```
 === probe_a6700: READ-ONLY USB diagnostic ===
 
-[+] PTP device opened (VID 0x054C PID 0x0DE7, interface #0).
+[+] PTP device opened (VID 0x054C PID 0x0E78, interface #0).
 
 [1] OpenSession(0x1002)          -> OK
-[2] GetDeviceInfo(0x1001)        -> OK (512 bytes)
+[2] GetDeviceInfo(0x1001)        -> OK (… bytes)
       Manufacturer     : Sony Corporation
       Model            : ILCE-6700
-      Firmware version : 1.00
+      Firmware version : 2.00
       Serial number    : xxxxxxxx
       Vendor extension : id=0x11 "Sony PTP Extensions"
-      Operations       : 42 (vendor 0x92xx: 30)
-      Properties       : 7
+      Operations       : … (vendor 0x92xx: 61)
+      Properties       : …
+
+[2b] Vendor operations 0x92xx (61):
+       0x9201  SDIO_Connect
+       0x9202  SDIO_GetExtDeviceInfo
+       0x9203  GetExtDevicePropDesc
+       …       …
 [3] SDIO_Connect(0x9201) ph1     -> OK
 [3] SDIO_Connect(0x9201) ph2     -> OK
-[4] SDIO_GetExtDeviceInfo(0x9202)-> OK (900 bytes)
-[5] GetExtDevicePropDesc still_capture_mode (drive mode) -> OK (40 bytes)
-[5] GetExtDevicePropDesc aspect_ratio                    -> OK (28 bytes)
-[5] GetExtDevicePropDesc file_format_movie               -> OK (36 bytes)
+[4] SDIO_GetExtDeviceInfo(0x9202)-> OK (… bytes)
+[3] SDIO_Connect(0x9201) ph3     -> OK
+[5] GetExtDevicePropDesc still_capture_mode (drive mode) -> OK (… bytes)
+[5] GetExtDevicePropDesc aspect_ratio                    -> OK (… bytes)
+[5] GetExtDevicePropDesc file_format_movie               -> OK (… bytes)
 
 [+] CloseSession(0x1003)         -> session closed.
 ```

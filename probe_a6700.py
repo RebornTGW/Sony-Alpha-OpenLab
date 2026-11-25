@@ -102,6 +102,70 @@ PROP_NAMES = {
     0xD20D: "shutter_speed",
 }
 
+# Known Sony vendor operation names (0x92xx), cross-referenced with
+# docs/PROTOCOL.en.md. Display only; protocol constants, not firmware data.
+VENDOR_OP_NAMES = {
+    0x9201: "SDIO_Connect",
+    0x9202: "SDIO_GetExtDeviceInfo",
+    0x9203: "GetExtDevicePropDesc",
+    0x9204: "GetExtDevicePropValue",
+    0x9205: "SetExtDevicePropValue",
+    0x9206: "GetControlDeviceDesc",
+    0x9207: "ControlDevice",
+    0x9208: "GetAllExtDeviceProp",
+    0x9209: "GetAllExtDevicePropInfo",
+    0x920A: "GetCautionInfo",
+    0x920B: "RequestInhibitReason",
+    0x920C: "FreeObjectHandle",
+    0x920D: "GetFocalMarkerInfo",
+    0x920E: "GetFTPDisplayNameList",
+    0x920F: "SetFTPSettingFilePassword",
+    0x9210: "OpenSession",
+    0x9211: "GetPartialLargeObject",
+    0x9212: "SetContentsTransferMode",
+    0x9213: "GetDeviceLog",
+    0x9214: "SetRemoteSdkInfo",
+    0x9215: "GetDisplayStringList",
+    0x9216: "GetVenderCodeVersion",
+    0x9217: "GetFTPJobList",
+    0x9218: "ControlFTPJobList",
+    0x9219: "GetPartialLargeObjectForShortVideos",
+    0x921A: "UploadData",
+    0x921B: "ControlUploadData",
+    0x921C: "GetDeviceRegInfo",
+    0x921D: "DownloadData",
+    0x921E: "GetAccessibilityDataForBase",
+    0x921F: "GetFTPSettingList",
+    0x9220: "SetFTPSettingList",
+    0x9221: "ControlGeneralSettingFile",
+    0x9222: "GetControlGeneralSettingResultFile",
+    0x9223: "GetLensInformation",
+    0x9224: "SetExternalDataList",
+    0x9225: "GetControlReqInfo",
+    0x9226: "ControlReqError",
+    0x9227: "RequestFirmwareUpdateCheck",
+    0x9228: "SetFirmwareUpdateMode",
+    0x9229: "UploadPartialData",
+    0x922A: "ExecuteEFraming",
+    0x922B: "GetContentListProtocolBuffers",
+    0x922C: "TransferFileToHTTPServer",
+    0x922F: "OperationResultsSupported",
+    0x9230: "ControlMonitoring",
+    0x9231: "GetPresetInfoList",
+    0x9232: "SetLicenseUploadMode",
+    0x9233: "GetDisplayFTPResult",
+    0x9234: "UploadFileCheck",
+    0x9235: "ControlSynchronizedRelease",
+    0x9236: "SetSynchronizedReleaseInformation",
+    0x9237: "GetSynchronizedReleaseInformation",
+    0x9238: "GetOSDImage",
+    0x9239: "GetRestrictionInfo",
+    0x923A: "GetDeviceDescriptionFile",
+    0x9251: "GetExtDeviceProp",
+    0x9280: "SendExtCommand",
+    0x9281: "GetExtResponse",
+}
+
 DEFAULT_TIMEOUT_MS = 4000
 
 
@@ -367,23 +431,41 @@ def run_probe(pid: int | None, do_sdio: bool = True):
                   f" \"{di.get('vendor_extension_desc','')}\"")
             ops = di.get("operations_supported", [])
             props = di.get("device_properties_supported", [])
+            vendor_ops = [o for o in ops if 0x9200 <= o <= 0x92FF]
             print(f"      Operations       : {len(ops)} "
-                  f"(vendor 0x92xx: {sum(1 for o in ops if 0x9200 <= o <= 0x92FF)})")
+                  f"(vendor 0x92xx: {len(vendor_ops)})")
             print(f"      Properties       : {len(props)}")
+
+            # 2b) Full list of vendor 0x92xx opcodes, cross-referenced with
+            #     the documented names (docs/PROTOCOL.en.md).
+            if vendor_ops:
+                print(f"\n[2b] Vendor operations 0x92xx ({len(vendor_ops)}):")
+                for o in sorted(vendor_ops):
+                    print(f"       0x{o:04X}  {VENDOR_OP_NAMES.get(o, '(unknown)')}")
+                print()
 
         if not do_sdio:
             return
 
-        # 3) SDIO Connect - extended-session handshake (read/negotiation)
-        #    2-phase negotiation; no camera setting is modified.
+        # 3) SDIO Connect handshake - standard Sony sequence (read-only).
+        #    ph1 -> ph2 -> GetExtDeviceInfo -> ph3. Each Connect may return a
+        #    PTP DATA phase; transaction() consumes it before the RESPONSE.
         for phase in (1, 2):
-            rc, _ = dev.transaction(OP_SDIO_CONNECT, params=[phase, 0x0000DA01, 0])
-            print(f"[3] SDIO_Connect(0x9201) ph{phase}     -> {rc_str(rc)}")
+            rc, data = dev.transaction(OP_SDIO_CONNECT, params=[phase, 0, 0])
+            extra = f" ({len(data)} bytes data)" if data else ""
+            print(f"[3] SDIO_Connect(0x9201) ph{phase}     -> {rc_str(rc)}{extra}")
             time.sleep(0.05)
 
-        # 4) GetExtDeviceInfo (read extended capabilities)
-        rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x00C8])
+        # 4) GetExtDeviceInfo - SDK version 0x012C (300); fallback 0x00C8 (200).
+        rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x012C])
+        if rc != PTP_RC_OK:
+            rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x00C8])
         print(f"[4] SDIO_GetExtDeviceInfo(0x9202)-> {rc_str(rc)} ({len(data)} bytes)")
+
+        # 3c) SDIO Connect phase 3 - finalize the handshake.
+        rc, data = dev.transaction(OP_SDIO_CONNECT, params=[3, 0, 0])
+        extra = f" ({len(data)} bytes data)" if data else ""
+        print(f"[3] SDIO_Connect(0x9201) ph3     -> {rc_str(rc)}{extra}")
 
         # 5) GetExtDevicePropDesc (read a few safe descriptors)
         for code in (0x5013, 0xD211, 0xD241):
