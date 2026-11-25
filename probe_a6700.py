@@ -130,6 +130,18 @@ class PtpUsbDevice:
         kwargs = {"idVendor": vid, "find_all": True}
         if pid is not None:
             kwargs["idProduct"] = pid
+
+        # On Windows, pyusb often raises NoBackendError because it cannot locate a
+        # libusb-1.0 DLL on its own. `libusb-package` ships a prebuilt backend, so
+        # use it when available; otherwise fall back to pyusb's default discovery.
+        try:
+            import libusb_package
+            backend = libusb_package.get_libusb1_backend()
+        except ImportError:
+            backend = None
+        if backend is not None:
+            kwargs["backend"] = backend
+
         candidates = list(usb.core.find(**kwargs))
         if not candidates:
             raise PtpError(
