@@ -411,9 +411,12 @@ classique ; `lighten` garde les pixels les plus clairs. La fenêtre utilise `tki
 
 **Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
 `GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial
-**`0xFFFFC001`**, que `--download-dir` lit après chaque prise via `GetObject`. Réglez
-la **Destination d'enregistrement sur « PC + Caméra » ou « PC seul »** pour que cela
-fonctionne.
+**`0xFFFFC001`**, que `--download-dir` lit après chaque prise via `GetObject`. Le
+buffer 26 Mpx n'est pas prêt instantanément : l'outil **interroge `0xFFFFC001` jusqu'à
+~3 s**. Pour fiabiliser même si le menu est sur « Caméra seule », l'outil envoie aussi
+`SetContentsTransferMode (0x9212)` à la connexion pour router les images vers le handle
+PC (désactivable avec `--no-pc-transfer`). Régler la **Destination d'enregistrement sur
+« PC + Caméra » ou « PC seul »** reste le plus fiable.
 
 **Empilement hors-ligne.** `--stack-dir DIR --stack OUT` (sans
 `--confirm-session-write`) empile les images d'un dossier **sans toucher au boîtier** —

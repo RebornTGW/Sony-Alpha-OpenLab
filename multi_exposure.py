@@ -64,6 +64,11 @@ OP_GET_OBJECT_HANDLES = 0x1007
 OP_GET_OBJECT_INFO = 0x1008
 OP_GET_OBJECT = 0x1009
 
+# SDIO_SetContentsTransferMode (session write): routes captured contents to the PC
+# handle (0xFFFFC001) with the "disclose contents" flag, independent of the camera's
+# Save Destination menu. param1 = transfer mode, param2 = disclose-contents flag.
+OP_SDIO_SET_CONTENTS_TRANSFER_MODE = 0x9212
+
 # In PC Remote mode the A6700 does not expose GetObjectHandles; it instead places
 # the last captured image on this special Sony "PC save" object handle, readable
 # via GetObjectInfo / GetObject. Requires "Save Destination: PC+Camera" or "PC only"
@@ -101,6 +106,21 @@ def connect(pid, allowed, sdk_handshake=False) -> PtpUsbDevice:
     return dev
 
 
+def enable_pc_content_transfer(dev, mode=1, disclose=1):
+    """Send SetContentsTransferMode (0x9212) to route captured images to the PC
+    handle (0xFFFFC001) with 'disclose contents', so downloads work even if the
+    camera's Save Destination menu is left on 'Camera only'. Session-only; value
+    semantics are best-effort (param1=mode 1/2, param2=disclose)."""
+    try:
+        rc, _ = dev.transaction(OP_SDIO_SET_CONTENTS_TRANSFER_MODE,
+                                params=[mode, disclose, 0])
+    except PtpError as e:
+        print(f"[xfer  ] SetContentsTransferMode(0x9212) not sent: {e}")
+        return
+    print(f"[xfer  ] SetContentsTransferMode(0x9212) mode={mode} disclose={disclose} "
+          f"-> {rc_str(rc)}")
+
+
 def set_drive_mode(dev, value: int):
     print(f"[drive ] SetExtDevicePropValue(0x5013 still_capture_mode) <- {value}")
     rc, _ = dev.transaction(OP_SDIO_SET_EXT_DEVICE_PROP_VALUE,
@@ -124,23 +144,28 @@ def capture_one(dev, af=True, af_delay=0.4, hold=0.12):
                         send_data=_u16(BTN_RELEASE))
 
 
-def fetch_pc_save_object(dev, out_dir, index):
+def fetch_pc_save_object(dev, out_dir, index, retries=12, delay=0.25):
     """After a capture in PC Remote mode, pull the image the camera placed on the
-    special Sony PC-save handle (0xFFFFC001). Read-only GetObject; returns the saved
-    path or None."""
-    try:
-        rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_PC_SAVE_HANDLE])
-    except PtpError:
-        return None
-    if rc != PTP_RC_OK or not data:
-        return None
-    os.makedirs(out_dir, exist_ok=True)
-    ext = ".jpg" if data[:2] == b"\xff\xd8" else ".bin"
-    path = os.path.join(out_dir, f"frame_{index:03d}{ext}")
-    with open(path, "wb") as f:
-        f.write(data)
-    print(f"         saved frame {index} -> {path} ({len(data)} bytes)")
-    return path
+    special Sony PC-save handle (0xFFFFC001). The full-res (26 MP) buffer is not
+    ready instantly, so poll 0xFFFFC001 up to `retries` times, `delay` s apart
+    (default 12 x 0.25 s = 3 s max). Read-only GetObject; returns the saved path
+    or None."""
+    for attempt in range(1, retries + 1):
+        try:
+            rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_PC_SAVE_HANDLE])
+        except PtpError:
+            rc, data = None, b""
+        if rc == PTP_RC_OK and data and data[:2] == b"\xff\xd8":
+            os.makedirs(out_dir, exist_ok=True)
+            path = os.path.join(out_dir, f"frame_{index:03d}.jpg")
+            with open(path, "wb") as f:
+                f.write(data)
+            print(f"         saved frame {index} -> {path} "
+                  f"({len(data)} bytes, after {attempt} poll(s))")
+            return path
+        time.sleep(delay)
+    print(f"         (image not ready on 0xFFFFC001 after {retries} polls)")
+    return None
 
 
 def capture_sequence(dev, shots: int, interval: float, af: bool, download_dir=None):
@@ -453,6 +478,10 @@ def main():
                          "over frame 1 in real time; Space captures. Needs tkinter+Pillow.")
     ap.add_argument("--overlay-opacity", type=float, default=0.5,
                     help="Live-overlay opacity of the live feed over frame 1 (0..1).")
+    ap.add_argument("--no-pc-transfer", action="store_true",
+                    help="Do NOT send SetContentsTransferMode (0x9212) during connect "
+                         "(by default it is sent when --download-dir is used, to route "
+                         "images to 0xFFFFC001 regardless of the Save Destination menu).")
     args = ap.parse_args()
 
     # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
@@ -474,7 +503,8 @@ def main():
 
     allowed = set(READ_ONLY_OPS)
     allowed.update({OP_SDIO_SET_EXT_DEVICE_PROP_VALUE, OP_SDIO_CONTROL_DEVICE,
-                    OP_GET_OBJECT_HANDLES, OP_GET_OBJECT_INFO, OP_GET_OBJECT})
+                    OP_GET_OBJECT_HANDLES, OP_GET_OBJECT_INFO, OP_GET_OBJECT,
+                    OP_SDIO_SET_CONTENTS_TRANSFER_MODE})
     if args.sdk_handshake:
         allowed.add(OP_SDIO_SET_REMOTE_SDK_INFO)
 
@@ -482,6 +512,12 @@ def main():
     dev = None
     try:
         dev = connect(args.pid, allowed, sdk_handshake=args.sdk_handshake)
+        # Route captured images to the PC handle (0xFFFFC001) whenever we download,
+        # unless disabled. Avoids "no image" when Save Destination = Camera only.
+        needs_download = (args.download_dir or args.interactive or args.live_overlay)
+        if needs_download and not args.no_pc_transfer:
+            enable_pc_content_transfer(dev)
+            time.sleep(0.2)
         if args.drive_value is not None:
             set_drive_mode(dev, args.drive_value)
             time.sleep(0.2)

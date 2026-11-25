@@ -204,6 +204,16 @@ Session-only writes were confirmed on real hardware:
 - **`GetExtDevicePropValue (0x9204)` is not supported** on the v300 dataset
   (`0x2005`); current values are read from the `GetAllExtDevicePropInfo (0x9209)`
   stream instead (~8019 bytes, 122 active properties in Video mode).
+- **Image routing to the PC handle.** In PC Remote mode the body does not expose
+  `GetObjectHandles (0x1007)`; it publishes the last captured image on the special
+  handle **`0xFFFFC001`** and the Live View stream on **`0xFFFFC002`**, both read via
+  `GetObject (0x1009)`. The full-resolution buffer is not ready instantly, so poll
+  `0xFFFFC001` for a few seconds after S2. **`SetContentsTransferMode (0x9212)`**
+  carries `CONTENT_TRANSFER_MODE` + an `IS_DISCLOSE_CONTENTS` flag (verified in
+  `libInfraRemote.so`): sending it during the SDIO handshake routes captured contents
+  to `0xFFFFC001` with "disclose", so downloads work even if the camera's *Save
+  Destination* menu is left on "Camera only" (exact `param1=1/2` / disclose values
+  are best-effort, to confirm live).
 - **Application-level HAITA lock on `aspect_ratio (0xD211)`.**
   `SetExtDevicePropValue(0xD211) <- 1` (3:2) returns `OK`, but the value re-read from
   `0x9209` stays `2` (16:9) in Video mode. The command is **accepted then silently

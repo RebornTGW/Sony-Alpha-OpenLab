@@ -206,6 +206,17 @@ Les écritures de session ont été confirmées sur boîtier réel :
 - **`GetExtDevicePropValue (0x9204)` non supporté** sur le dataset v300 (`0x2005`) ;
   les valeurs courantes se lisent dans le flux `GetAllExtDevicePropInfo (0x9209)`
   (~8019 octets, 122 propriétés actives en mode Vidéo).
+- **Routage des images vers le handle PC.** En mode PC Remote, le boîtier n'expose
+  pas `GetObjectHandles (0x1007)` ; il publie la dernière image capturée sur le handle
+  spécial **`0xFFFFC001`** et le flux Live View sur **`0xFFFFC002`**, lus via
+  `GetObject (0x1009)`. Le buffer pleine résolution n'est pas prêt instantanément : il
+  faut interroger `0xFFFFC001` en boucle pendant quelques secondes après S2.
+  **`SetContentsTransferMode (0x9212)`** porte `CONTENT_TRANSFER_MODE` + un flag
+  `IS_DISCLOSE_CONTENTS` (vérifié dans `libInfraRemote.so`) : l'envoyer pendant le
+  handshake SDIO route les contenus capturés vers `0xFFFFC001` avec « disclose », de
+  sorte que le téléchargement fonctionne même si le menu *Destination d'enregistrement*
+  est resté sur « Caméra seule » (valeurs exactes `param1=1/2` / disclose à confirmer
+  en direct).
 - **Verrou applicatif HAITA sur `aspect_ratio (0xD211)`.**
   `SetExtDevicePropValue(0xD211) <- 1` (3:2) renvoie `OK`, mais la valeur relue via
   `0x9209` reste à `2` (16:9) en mode Vidéo. La commande est **acceptée puis
