@@ -163,10 +163,19 @@ python probe_a6700.py --no-sdio
 # Full code lists (all vendor opcodes & all exposed properties)
 python probe_a6700.py --verbose
 
+# Also send the SDK handshake (SetRemoteSdkInfo 0x9214, session-only write)
+python probe_a6700.py --sdk-handshake
+
 # Force a specific USB PID
 # (A6700 in PC Remote mode = 0x0E78, confirmed on firmware 2.00)
 python probe_a6700.py --pid 0x0E78
 ```
+
+The probe reads property values with `GetExtDevicePropValue (0x9204)` in step
+`[5b]`, and decodes the `aspect_ratio` / `recording_setting_movie` /
+`recording_frame_rate_setting_movie` entries straight from the `0x9209` stream in
+`[4c]`. `--sdk-handshake` is the one exception to the read-only default (see the note
+above); everything else the probe does stays read-only.
 
 Code lists (vendor opcodes in `[2b]`, exposed properties in `[4]`/`[4b]`) are
 **compact by default**; pass `--verbose` for the full per-code listing. Step `[4b]`
@@ -291,6 +300,36 @@ embedded). Only **read** codes are issued by `probe_a6700.py`; the `ControlDevic
 
 ---
 
+## 🧪 Session-only experiments (`experiment_a6700.py`)
+
+`probe_a6700.py` stays **strictly read-only**. For controlled tests that actually
+write to the camera, a **separate** script `experiment_a6700.py` performs
+**session-only, non-persistent** operations (everything it changes lives in RAM and
+is erased on reboot / battery removal — nothing is written to storage or firmware).
+
+It refuses to run without the explicit flag **`--confirm-session-write`**, and prints
+the PTP response code of every operation so you can see what the body accepted.
+
+```powershell
+# Try to set aspect_ratio (0xD211) to 3:2 in Video mode, then read it back
+python experiment_a6700.py --confirm-session-write --test-aspect-3-2
+
+# Controlled multi-frame trigger: optional drive-mode set + S1/S2 sequence
+python experiment_a6700.py --confirm-session-write --test-burst-trigger --drive-value 0x2
+```
+
+| Experiment | What it does (session-only) |
+|---|---|
+| `--test-aspect-3-2` | `SetExtDevicePropValue(0x9205)` writes `1` (3:2) to `aspect_ratio` (0xD211), re-reads the value and prints the PTP result (`0x2001 OK` vs an error = blocked by the capability gate). |
+| `--test-burst-trigger` | optionally sets `still_capture_mode` (0x5013) via `--drive-value`, then runs `ControlDevice(0x9207)`: `S1` (0xD2C1) press/release + `S2` (0xD2C2) press/release. |
+
+> ⚠️ These writes change the camera's **live session state** (and `--test-burst-trigger`
+> **takes a picture**). They are volatile, but use them deliberately, on your own
+> hardware, with no important card contents. The S1/S2 values and SDK payload are
+> best-effort and may need per-body adjustment. See [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+---
+
 ## 💬 Community & ideas
 
 Ideas for features or for cameras to support are very welcome:
@@ -322,7 +361,9 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ```
 A6700-Remote-Tools/
-├── probe_a6700.py     # read-only USB diagnostic probe
+├── probe_a6700.py       # read-only USB diagnostic probe
+├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
+├── sony_codes.py        # generated PTP code dictionaries (protocol constants)
 ├── requirements.txt   # Python dependencies (pyusb)
 ├── .gitignore         # strict exclusion of firmware binaries
 ├── LICENSE            # MIT license

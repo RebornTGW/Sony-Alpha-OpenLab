@@ -170,10 +170,19 @@ python probe_a6700.py --no-sdio
 # Listes de codes complètes (tous les opcodes vendor & toutes les propriétés)
 python probe_a6700.py --verbose
 
+# Envoyer aussi le handshake SDK (SetRemoteSdkInfo 0x9214, écriture de session)
+python probe_a6700.py --sdk-handshake
+
 # Forcer un PID USB précis
 # (A6700 en mode PC Remote = 0x0E78, confirmé sur firmware 2.00)
 python probe_a6700.py --pid 0x0E78
 ```
+
+La sonde lit les valeurs via `GetExtDevicePropValue (0x9204)` à l'étape `[5b]`, et
+décode les entrées `aspect_ratio` / `recording_setting_movie` /
+`recording_frame_rate_setting_movie` directement depuis le flux `0x9209` en `[4c]`.
+`--sdk-handshake` est la seule exception à la lecture seule par défaut (voir la note
+ci-dessus) ; tout le reste de la sonde demeure en lecture seule.
 
 Les listes de codes (opcodes vendor en `[2b]`, propriétés exposées en `[4]`/`[4b]`)
 sont **compactes par défaut** ; `--verbose` affiche la liste complète code par code.
@@ -302,6 +311,38 @@ déclenchés** par cet outil.
 
 ---
 
+## 🧪 Expérimentations de session (`experiment_a6700.py`)
+
+`probe_a6700.py` reste **strictement en lecture seule**. Pour des tests contrôlés qui
+**écrivent** réellement dans le boîtier, un script **séparé** `experiment_a6700.py`
+effectue des opérations **de session, non persistantes** (tout ce qu'il modifie vit
+en RAM et est effacé au redémarrage / retrait de batterie — rien n'est écrit en
+mémoire ni dans le firmware).
+
+Il refuse de s'exécuter sans le drapeau explicite **`--confirm-session-write`**, et
+affiche le code de retour PTP de chaque opération.
+
+```powershell
+# Tenter de passer aspect_ratio (0xD211) en 3:2 en mode Vidéo, puis relire
+python experiment_a6700.py --confirm-session-write --test-aspect-3-2
+
+# Déclenchement multi-vues contrôlé : réglage drive optionnel + séquence S1/S2
+python experiment_a6700.py --confirm-session-write --test-burst-trigger --drive-value 0x2
+```
+
+| Expérimentation | Ce qu'elle fait (session uniquement) |
+|---|---|
+| `--test-aspect-3-2` | `SetExtDevicePropValue(0x9205)` écrit `1` (3:2) dans `aspect_ratio` (0xD211), relit la valeur et affiche le résultat PTP (`0x2001 OK` vs erreur = bloqué par le verrou de capacité). |
+| `--test-burst-trigger` | règle éventuellement `still_capture_mode` (0x5013) via `--drive-value`, puis exécute `ControlDevice(0x9207)` : `S1` (0xD2C1) press/release + `S2` (0xD2C2) press/release. |
+
+> ⚠️ Ces écritures modifient l'**état de session en direct** (et `--test-burst-trigger`
+> **prend une photo**). Elles sont volatiles, mais à utiliser délibérément, sur votre
+> propre matériel, sans contenu de carte important. Les valeurs S1/S2 et le payload
+> SDK sont best-effort et peuvent nécessiter un ajustement selon le boîtier. Voir
+> [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md).
+
+---
+
 ## 💬 Communauté & idées
 
 Les idées de fonctionnalités ou de boîtiers à prendre en charge sont les bienvenues :
@@ -333,7 +374,9 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ```
 A6700-Remote-Tools/
-├── probe_a6700.py     # sonde diagnostic USB lecture seule
+├── probe_a6700.py       # sonde diagnostic USB lecture seule
+├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
+├── sony_codes.py        # dictionnaires de codes PTP (constantes de protocole)
 ├── requirements.txt   # dépendances Python (pyusb)
 ├── .gitignore         # exclusion stricte des binaires/firmware
 ├── LICENSE            # licence MIT

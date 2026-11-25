@@ -70,11 +70,13 @@ OP_GET_DEVICE_INFO = 0x1001
 OP_SDIO_CONNECT = 0x9201
 OP_SDIO_GET_EXT_DEVICE_INFO = 0x9202
 OP_SDIO_GET_EXT_DEVICE_PROP_DESC = 0x9203
+OP_SDIO_GET_EXT_DEVICE_PROP_VALUE = 0x9204  # read-only: current value of a prop
 OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO = 0x9209  # read-only dump of all props
 
-# Not in the whitelist: it sends data host->camera (session handshake, not a
-# settings write). Kept out of the read-only default on purpose; see README.
-OP_SDIO_SET_REMOTE_SDK_INFO = 0x9214
+# Session write ops (host->device DATA). NOT in the read-only whitelist.
+OP_SDIO_SET_REMOTE_SDK_INFO = 0x9214  # host SDK handshake (opt-in: --sdk-handshake)
+OP_SDIO_SET_EXT_DEVICE_PROP_VALUE = 0x9205  # write a property (experiment only)
+OP_SDIO_CONTROL_DEVICE = 0x9207  # actuation/trigger (experiment only)
 
 READ_ONLY_OPS = {
     OP_OPEN_SESSION,
@@ -83,6 +85,7 @@ READ_ONLY_OPS = {
     OP_SDIO_CONNECT,
     OP_SDIO_GET_EXT_DEVICE_INFO,
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC,
+    OP_SDIO_GET_EXT_DEVICE_PROP_VALUE,
     OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO,
 }
 
@@ -93,7 +96,11 @@ OP_NAMES = {
     OP_SDIO_CONNECT: "SDIO_Connect",
     OP_SDIO_GET_EXT_DEVICE_INFO: "SDIO_GetExtDeviceInfo",
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC: "SDIO_GetExtDevicePropDesc",
+    OP_SDIO_GET_EXT_DEVICE_PROP_VALUE: "SDIO_GetExtDevicePropValue",
     OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO: "SDIO_GetAllExtDevicePropInfo",
+    OP_SDIO_SET_REMOTE_SDK_INFO: "SDIO_SetRemoteSdkInfo",
+    OP_SDIO_SET_EXT_DEVICE_PROP_VALUE: "SDIO_SetExtDevicePropValue",
+    OP_SDIO_CONTROL_DEVICE: "SDIO_ControlDevice",
 }
 
 PTP_RC_OK = 0x2001  # "OK" response code
@@ -142,17 +149,23 @@ class PtpError(RuntimeError):
 class PtpUsbDevice:
     """Minimal PTP transport on top of pyusb (bulk-in / bulk-out)."""
 
-    def __init__(self, dev: "usb.core.Device", intf, ep_in, ep_out):
+    def __init__(self, dev: "usb.core.Device", intf, ep_in, ep_out,
+                 allowed_ops=None):
         self.dev = dev
         self.intf = intf
         self.ep_in = ep_in
         self.ep_out = ep_out
         self._txid = 0
+        # The set of opcodes this instance is permitted to send. Defaults to the
+        # strict read-only whitelist; callers (e.g. experiment_a6700.py) may pass
+        # a wider set explicitly to enable session-only writes.
+        self.allowed_ops = set(READ_ONLY_OPS if allowed_ops is None else allowed_ops)
 
     # -- discovery --------------------------------------------------------
 
     @classmethod
-    def open_first(cls, vid: int = SONY_VID, pid: int | None = None) -> "PtpUsbDevice":
+    def open_first(cls, vid: int = SONY_VID, pid: int | None = None,
+                   allowed_ops=None) -> "PtpUsbDevice":
         kwargs = {"idVendor": vid, "find_all": True}
         if pid is not None:
             kwargs["idProduct"] = pid
@@ -222,7 +235,7 @@ class PtpUsbDevice:
                 except (usb.core.USBError, NotImplementedError):
                     pass
 
-            return cls(dev, intf, ep_in, ep_out)
+            return cls(dev, intf, ep_in, ep_out, allowed_ops=allowed_ops)
 
         raise PtpError(
             "A Sony device was found but no usable PTP interface (class 0x06). "
@@ -254,17 +267,21 @@ class PtpUsbDevice:
         self._txid = (self._txid + 1) & 0xFFFFFFFF
         return self._txid
 
-    def transaction(self, opcode: int, params=(), timeout_ms: int = DEFAULT_TIMEOUT_MS):
-        """Issue a PTP operation (command phase, data phase in RECEPTION only,
-        response phase) and return (response_code, data_bytes).
+    def transaction(self, opcode: int, params=(), send_data: bytes | None = None,
+                    timeout_ms: int = DEFAULT_TIMEOUT_MS):
+        """Issue a PTP operation and return (response_code, data_bytes).
 
-        Refuses any opcode absent from the READ_ONLY_OPS whitelist.
-        Never performs a data phase in transmission (no writes).
+        - Refuses any opcode not in self.allowed_ops (default = READ_ONLY_OPS).
+        - send_data is None (default): no host->device data phase; any device
+          DATA phase is received and returned. This is the read-only path.
+        - send_data is bytes: a host->device DATA phase is sent (a session write).
+          Only reachable for an opcode the caller explicitly allowed; the strict
+          read-only probe never passes send_data.
         """
-        if opcode not in READ_ONLY_OPS:
+        if opcode not in self.allowed_ops:
             raise PtpError(
-                f"REFUSED: opcode 0x{opcode:04X} is not in the read-only whitelist. "
-                "This script issues no write/control operation."
+                f"REFUSED: opcode 0x{opcode:04X} is not in this instance's allowed "
+                "set. The default probe is strictly read-only."
             )
 
         params = list(params)
@@ -279,7 +296,17 @@ class PtpUsbDevice:
         packet = struct.pack("<I", len(body) + 4) + body
         self.ep_out.write(packet, timeout_ms)
 
-        # --- Data phase (reception, if any) ---
+        # --- Host->device DATA phase (session write only) ---
+        if send_data is not None:
+            dhdr = struct.pack("<IHHI", 12 + len(send_data),
+                               PTP_CONTAINER_DATA, opcode, txid)
+            self.ep_out.write(dhdr + bytes(send_data), timeout_ms)
+            resp = self._read_container(timeout_ms)
+            if resp["type"] != PTP_CONTAINER_RESPONSE:
+                raise PtpError(f"Missing PTP response (type=0x{resp['type']:04X})")
+            return resp["code"], b""
+
+        # --- Device->host DATA phase (reception, if any) ---
         data = b""
         first = self._read_container(timeout_ms)
         ctype = first["type"]
@@ -515,6 +542,32 @@ def decode_prop_desc(code: int, data: bytes):
               f"({len(data)} bytes), raw = {hex_dump}")
 
 
+def decode_prop_value(code: int, data: bytes):
+    """Decode a GetExtDevicePropValue (0x9204) payload (the current value only)."""
+    label = prop_name(code)
+    if not data:
+        print(f"        -> 0x{code:04X} {label}: no value (empty)")
+        return
+    hexs = data.hex()
+    as_int = int.from_bytes(data[:min(len(data), 4)], "little")
+    print(f"        -> 0x{code:04X} {label}: value={as_int} (0x{as_int:X}), "
+          f"raw={hexs}")
+
+
+def find_and_decode_in_stream(data: bytes, code: int) -> bool:
+    """Locate a property's DevicePropDesc inside the GetAllExtDevicePropInfo
+    (0x9209) stream and decode it in place. Returns True if found. Read-only."""
+    for i in range(0, len(data) - 4, 2):
+        if struct.unpack_from("<H", data, i)[0] != code:
+            continue
+        dtype = struct.unpack_from("<H", data, i + 2)[0]
+        if dtype in PTP_DATATYPES:  # plausible DevicePropDesc start
+            decode_prop_desc(code, data[i:])
+            return True
+    print(f"        -> 0x{code:04X} {prop_name(code)}: not located in stream")
+    return False
+
+
 def decode_all_ext_prop_info(data: bytes, verbose: bool = False):
     """Decode SDIO_GetAllExtDevicePropInfo (0x9209): the global stream of all
     property descriptors the camera reports. Rather than fully parse each
@@ -550,9 +603,16 @@ def rc_str(rc: int) -> str:
     return "OK" if rc == PTP_RC_OK else f"0x{rc:04X}"
 
 
-def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False):
-    print("=== probe_a6700: READ-ONLY USB diagnostic ===\n")
-    dev = PtpUsbDevice.open_first(pid=pid)
+def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False,
+              sdk_handshake: bool = False):
+    banner = "READ-ONLY USB diagnostic"
+    if sdk_handshake:
+        banner += " (+ SDK handshake: session-only write)"
+    print(f"=== probe_a6700: {banner} ===\n")
+    allowed = set(READ_ONLY_OPS)
+    if sdk_handshake:
+        allowed.add(OP_SDIO_SET_REMOTE_SDK_INFO)
+    dev = PtpUsbDevice.open_first(pid=pid, allowed_ops=allowed)
     print(f"[+] PTP device opened "
           f"(VID 0x{dev.dev.idVendor:04X} PID 0x{dev.dev.idProduct:04X}, "
           f"interface #{dev.intf.bInterfaceNumber}).\n")
@@ -607,6 +667,15 @@ def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False):
             print(f"[3] SDIO_Connect(0x9201) ph{phase}     -> {rc_str(rc)}{extra}")
             time.sleep(0.05)
 
+        # 3b) Optional SDK handshake (--sdk-handshake). Session-only write that
+        #     registers the host SDK version; may unlock the video property set.
+        if sdk_handshake:
+            sdk_blob = struct.pack("<I", 0x0000012C)  # best-effort SDK version 300
+            rc, _ = dev.transaction(OP_SDIO_SET_REMOTE_SDK_INFO, params=[0x012C],
+                                    send_data=sdk_blob)
+            print(f"[3b] SDIO_SetRemoteSdkInfo(0x9214) -> {rc_str(rc)} "
+                  "(session-only; experimental payload)")
+
         # 4) GetExtDeviceInfo - SDK version 0x012C (300); fallback 0x00C8 (200).
         rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x012C])
         if rc != PTP_RC_OK:
@@ -627,8 +696,15 @@ def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False):
         )
         print(f"\n[4b] SDIO_GetAllExtDevicePropInfo(0x9209) -> {rc_str(rc)} "
               f"({len(data)} bytes)")
-        if rc == PTP_RC_OK and data:
-            decode_all_ext_prop_info(data, verbose=verbose)
+        all_prop_stream = data if rc == PTP_RC_OK else b""
+        if all_prop_stream:
+            decode_all_ext_prop_info(all_prop_stream, verbose=verbose)
+
+        # 4c) Decode selected video entries directly from the 0x9209 stream.
+        if all_prop_stream:
+            print("\n[4c] Video entries decoded from the 0x9209 stream:")
+            for code in (0xD211, 0xD242, 0xD286):
+                find_and_decode_in_stream(all_prop_stream, code)
 
         # 5) GetExtDevicePropDesc - read and decode a few safe descriptors
         #    (current value + allowed values). Read-only.
@@ -642,6 +718,17 @@ def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False):
                   f"-> {rc_str(rc)} ({len(data)} bytes)")
             if rc == PTP_RC_OK:
                 decode_prop_desc(code, data)
+
+        # 5b) Exact current values via GetExtDevicePropValue (0x9204), read-only.
+        print("\n[5b] GetExtDevicePropValue (current values):")
+        for code in (0xD241, 0xD242, 0xD286, 0xD21D):
+            rc, data = dev.transaction(
+                OP_SDIO_GET_EXT_DEVICE_PROP_VALUE, params=[code]
+            )
+            print(f"    0x{code:04X} {prop_name(code):<30} "
+                  f"-> {rc_str(rc)} ({len(data)} bytes)")
+            if rc == PTP_RC_OK:
+                decode_prop_value(code, data)
 
     finally:
         # Clean session close (read-only).
@@ -663,10 +750,15 @@ def main():
                     help="Stop after GetDeviceInfo (standard PTP only).")
     ap.add_argument("--verbose", "-v", action="store_true",
                     help="Print the full code lists (opcodes & properties).")
+    ap.add_argument("--sdk-handshake", action="store_true",
+                    help="Also send SetRemoteSdkInfo (0x9214) - a session-only "
+                         "handshake write - which may unlock the video property "
+                         "set. Not part of the strict read-only default.")
     args = ap.parse_args()
 
     try:
-        run_probe(pid=args.pid, do_sdio=not args.no_sdio, verbose=args.verbose)
+        run_probe(pid=args.pid, do_sdio=not args.no_sdio, verbose=args.verbose,
+                  sdk_handshake=args.sdk_handshake)
     except PtpError as e:
         sys.exit(f"[ERROR] {e}")
     except usb.core.USBError as e:
