@@ -167,6 +167,14 @@ python probe_a6700.py --pid 0x0E78
 
 > 📌 **Known A6700 PID:** `0x0E78` in **PC Remote** USB mode (confirmed live on
 > firmware **2.00**). The PID differs per USB connection mode and per body.
+>
+> ✅ **Validated live (A6700, firmware 2.00).** The full read-only sequence was
+> confirmed on real hardware: `SDIO_Connect(0x9201)` ph1/ph2/ph3 each return
+> `OK (8 bytes data)`, `SDIO_GetExtDeviceInfo(0x9202)` returns ~826 bytes, and
+> `GetExtDevicePropDesc` decodes the current value + allowed values (e.g.
+> `still_capture_mode`, `aspect_ratio`). `file_format_movie` returns an empty
+> descriptor when the camera is in Photo mode. The probe also prints an endpoint
+> `clear_halt` cleanup and a decoded list of the exposed DeviceProp / control codes.
 
 ### Expected output (example, A6700 firmware 2.00)
 

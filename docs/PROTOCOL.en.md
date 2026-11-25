@@ -184,6 +184,15 @@ CloseSession(0x1003)
 `probe_a6700.py` stops at the **read** steps (up to `GetExtDevicePropDesc`), then
 closes the session.
 
+> ✅ **Validated live — A6700, firmware 2.00.** This exact handshake was confirmed on
+> real hardware (PID `0x0E78`, PC Remote mode): `SDIO_Connect(0x9201)` ph1/ph2/ph3
+> each return `OK` with an 8-byte DATA phase; `SDIO_GetExtDeviceInfo(0x9202)` returns
+> ~826 bytes; `GetExtDevicePropDesc(0x9203)` returns a decodable `DevicePropDesc`
+> (e.g. 66 bytes for `still_capture_mode`, 12 bytes for `aspect_ratio`, and an empty
+> descriptor for `file_format_movie` while the body is in Photo mode). Each
+> `SDIO_Connect` phase returns a short DATA payload that must be consumed before the
+> RESPONSE, and `param2`/`param3` must be `0`.
+
 ---
 
 ## 6. Extraction methodology

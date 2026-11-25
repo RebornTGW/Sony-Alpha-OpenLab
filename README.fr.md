@@ -174,6 +174,15 @@ python probe_a6700.py --pid 0x0E78
 
 > 📌 **PID A6700 connu :** `0x0E78` en mode USB **PC Remote** (confirmé en direct sur
 > firmware **2.00**). Le PID diffère selon le mode de connexion USB et le boîtier.
+>
+> ✅ **Validé en direct (A6700, firmware 2.00).** La séquence complète en lecture
+> seule a été confirmée sur boîtier réel : `SDIO_Connect(0x9201)` ph1/ph2/ph3
+> renvoient chacune `OK (8 bytes data)`, `SDIO_GetExtDeviceInfo(0x9202)` renvoie
+> ~826 octets, et `GetExtDevicePropDesc` décode la valeur courante + les valeurs
+> autorisées (ex. `still_capture_mode`, `aspect_ratio`). `file_format_movie` renvoie
+> un descripteur vide quand le boîtier est en mode Photo. La sonde affiche aussi un
+> nettoyage `clear_halt` des endpoints et la liste décodée des codes DeviceProp /
+> contrôle exposés.
 
 ### Sortie attendue (exemple, A6700 firmware 2.00)
 

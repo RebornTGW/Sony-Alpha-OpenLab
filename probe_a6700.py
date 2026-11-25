@@ -91,82 +91,37 @@ OP_NAMES = {
 
 PTP_RC_OK = 0x2001  # "OK" response code
 
-# A few symbolic DevicePropCode names, for display only
-# (protocol constants only; no firmware data).
-PROP_NAMES = {
-    0x5013: "still_capture_mode (drive mode)",
-    0xD211: "aspect_ratio",
-    0xD241: "file_format_movie",
-    0xD242: "recording_setting_movie",
-    0xD21E: "iso_sensitivity",
-    0xD20D: "shutter_speed",
-}
+# Symbolic name dictionaries (protocol constants only; no firmware data).
+# Loaded from the generated reference module sony_codes.py when available.
+try:
+    from sony_codes import DEVICE_PROP_NAMES, VENDOR_OP_NAMES
+except ImportError:  # minimal fallback if the module is missing
+    DEVICE_PROP_NAMES = {
+        0x5013: "still_capture_mode", 0xD211: "aspect_ratio",
+        0xD241: "file_format_movie", 0xD242: "recording_setting_movie",
+        0xD2C1: "s1_button", 0xD2C2: "s2_button", 0xD2C8: "movie_rec_button",
+    }
+    VENDOR_OP_NAMES = {
+        0x9201: "SDIO_Connect", 0x9202: "SDIO_GetExtDeviceInfo",
+        0x9203: "GetExtDevicePropDesc", 0x9205: "SetExtDevicePropValue",
+        0x9207: "ControlDevice",
+    }
 
-# Known Sony vendor operation names (0x92xx), cross-referenced with
-# docs/PROTOCOL.en.md. Display only; protocol constants, not firmware data.
-VENDOR_OP_NAMES = {
-    0x9201: "SDIO_Connect",
-    0x9202: "SDIO_GetExtDeviceInfo",
-    0x9203: "GetExtDevicePropDesc",
-    0x9204: "GetExtDevicePropValue",
-    0x9205: "SetExtDevicePropValue",
-    0x9206: "GetControlDeviceDesc",
-    0x9207: "ControlDevice",
-    0x9208: "GetAllExtDeviceProp",
-    0x9209: "GetAllExtDevicePropInfo",
-    0x920A: "GetCautionInfo",
-    0x920B: "RequestInhibitReason",
-    0x920C: "FreeObjectHandle",
-    0x920D: "GetFocalMarkerInfo",
-    0x920E: "GetFTPDisplayNameList",
-    0x920F: "SetFTPSettingFilePassword",
-    0x9210: "OpenSession",
-    0x9211: "GetPartialLargeObject",
-    0x9212: "SetContentsTransferMode",
-    0x9213: "GetDeviceLog",
-    0x9214: "SetRemoteSdkInfo",
-    0x9215: "GetDisplayStringList",
-    0x9216: "GetVenderCodeVersion",
-    0x9217: "GetFTPJobList",
-    0x9218: "ControlFTPJobList",
-    0x9219: "GetPartialLargeObjectForShortVideos",
-    0x921A: "UploadData",
-    0x921B: "ControlUploadData",
-    0x921C: "GetDeviceRegInfo",
-    0x921D: "DownloadData",
-    0x921E: "GetAccessibilityDataForBase",
-    0x921F: "GetFTPSettingList",
-    0x9220: "SetFTPSettingList",
-    0x9221: "ControlGeneralSettingFile",
-    0x9222: "GetControlGeneralSettingResultFile",
-    0x9223: "GetLensInformation",
-    0x9224: "SetExternalDataList",
-    0x9225: "GetControlReqInfo",
-    0x9226: "ControlReqError",
-    0x9227: "RequestFirmwareUpdateCheck",
-    0x9228: "SetFirmwareUpdateMode",
-    0x9229: "UploadPartialData",
-    0x922A: "ExecuteEFraming",
-    0x922B: "GetContentListProtocolBuffers",
-    0x922C: "TransferFileToHTTPServer",
-    0x922F: "OperationResultsSupported",
-    0x9230: "ControlMonitoring",
-    0x9231: "GetPresetInfoList",
-    0x9232: "SetLicenseUploadMode",
-    0x9233: "GetDisplayFTPResult",
-    0x9234: "UploadFileCheck",
-    0x9235: "ControlSynchronizedRelease",
-    0x9236: "SetSynchronizedReleaseInformation",
-    0x9237: "GetSynchronizedReleaseInformation",
-    0x9238: "GetOSDImage",
-    0x9239: "GetRestrictionInfo",
-    0x923A: "GetDeviceDescriptionFile",
-    0x9251: "GetExtDeviceProp",
-    0x9280: "SendExtCommand",
-    0x9281: "GetExtResponse",
+# PTP data types (code -> (name, byte_size)); size 0 = variable (string/array).
+PTP_DATATYPES = {
+    0x0001: ("INT8", 1), 0x0002: ("UINT8", 1),
+    0x0003: ("INT16", 2), 0x0004: ("UINT16", 2),
+    0x0005: ("INT32", 4), 0x0006: ("UINT32", 4),
+    0x0007: ("INT64", 8), 0x0008: ("UINT64", 8),
+    0xFFFF: ("STR", 0),
 }
 
 DEFAULT_TIMEOUT_MS = 4000
+
+
+def prop_name(code: int) -> str:
+    """Human label for a DevicePropCode / ControlDevice code."""
+    return DEVICE_PROP_NAMES.get(code, "(unknown)")
 
 
 # ---------------------------------------------------------------------------
@@ -251,6 +206,15 @@ class PtpUsbDevice:
                 # Already configured: carry on.
                 pass
             usb.util.claim_interface(dev, intf.bInterfaceNumber)
+
+            # Preventive cleanup: clear any residual halt/stall condition on the
+            # bulk endpoints so a previous aborted transfer cannot cause timeouts.
+            for ep in (ep_in, ep_out):
+                try:
+                    dev.clear_halt(ep.bEndpointAddress)
+                except (usb.core.USBError, NotImplementedError):
+                    pass
+
             return cls(dev, intf, ep_in, ep_out)
 
         raise PtpError(
@@ -395,6 +359,131 @@ def parse_device_info(data: bytes) -> dict:
     return info
 
 
+def _is_prop_code(v: int) -> bool:
+    """True if v looks like a Sony DevicePropCode / ControlDevice code."""
+    return (0x5000 <= v <= 0x50FF) or (0xD100 <= v <= 0xD3FF)
+
+
+def decode_ext_device_info(data: bytes):
+    """Decode SDIO_GetExtDeviceInfo (0x9202): list the DeviceProp / ControlDevice
+    codes the camera exposes live.
+
+    The dataset starts with a uint16 version followed by uint16-counted arrays of
+    uint16 codes. We parse those arrays defensively and, as a robust cross-check,
+    also scan the whole payload for known code values. Read-only decoding.
+    """
+    if len(data) < 4:
+        print("      (no extended device-info payload)")
+        return
+
+    version = struct.unpack_from("<H", data, 0)[0]
+    print(f"      Dataset version  : 0x{version:04X} ({version})")
+
+    # Greedy array parse: [u16 count][count x u16] blocks after the version.
+    off = 2
+    arrays = []
+    while off + 2 <= len(data):
+        count = struct.unpack_from("<H", data, off)[0]
+        if count == 0 or off + 2 + count * 2 > len(data) or count > 4096:
+            break
+        vals = list(struct.unpack_from("<%dH" % count, data, off + 2))
+        # Only trust the block if most entries look like real codes.
+        if sum(1 for v in vals if _is_prop_code(v)) < max(1, len(vals) // 2):
+            break
+        arrays.append(vals)
+        off += 2 + count * 2
+
+    # Robust cross-check: all known codes anywhere in the payload (16-bit aligned).
+    scanned = []
+    seen = set()
+    for i in range(0, len(data) - 1, 2):
+        v = struct.unpack_from("<H", data, i)[0]
+        if _is_prop_code(v) and v not in seen:
+            seen.add(v)
+            scanned.append(v)
+
+    codes = []
+    for a in arrays:
+        codes.extend(a)
+    if not codes:
+        codes = scanned  # fall back to the scan if structured parse found nothing
+
+    props = sorted({c for c in codes if not (0xD2C0 <= c <= 0xD3FF)})
+    ctrls = sorted({c for c in codes if 0xD2C0 <= c <= 0xD3FF})
+
+    if arrays:
+        print(f"      Parsed arrays    : {len(arrays)} "
+              f"({', '.join(str(len(a)) for a in arrays)} entries)")
+    print(f"      Exposed properties ({len(props)}):")
+    for c in props:
+        print(f"        0x{c:04X}  {prop_name(c)}")
+    print(f"      Exposed control/trigger codes ({len(ctrls)}):")
+    for c in ctrls:
+        print(f"        0x{c:04X}  {prop_name(c)}")
+
+
+def _read_dpv(data: bytes, off: int, dtype: int):
+    """Read one PTP property value of the given data type. Returns (value, off)."""
+    name, size = PTP_DATATYPES.get(dtype, ("?", 0))
+    if size == 0:  # string / unknown -> stop cleanly
+        s, off = _read_ptp_string(data, off)
+        return s, off
+    signed = name.startswith("INT") and not name.startswith("UINT")
+    val = int.from_bytes(data[off:off + size], "little", signed=signed)
+    return val, off + size
+
+
+def decode_prop_desc(code: int, data: bytes):
+    """Decode a Sony DevicePropDesc returned by GetExtDevicePropDesc (0x9203):
+    data type, GetSet access, current value and the allowed values (enum/range).
+
+    Sony layout: code(2) type(2) GetSet(1) Enable(1) FactoryDefault(DTS)
+    CurrentValue(DTS) FormFlag(1) [form]. Defensive: on any mismatch, falls back
+    to a raw hex dump so nothing is lost.
+    """
+    label = prop_name(code)
+    if not data:
+        print(f"        -> 0x{code:04X} {label}: empty descriptor "
+              "(property not available in the current camera mode)")
+        return
+    try:
+        pcode = struct.unpack_from("<H", data, 0)[0]
+        dtype = struct.unpack_from("<H", data, 2)[0]
+        getset = data[4]
+        enable = data[5]
+        off = 6
+        default, off = _read_dpv(data, off, dtype)
+        current, off = _read_dpv(data, off, dtype)
+        form = data[off]; off += 1
+
+        tname = PTP_DATATYPES.get(dtype, ("0x%04X" % dtype, 0))[0]
+        gs = "Get/Set" if getset == 1 else "Get only"
+        print(f"        -> 0x{pcode:04X} {label}")
+        print(f"           type={tname}  access={gs}  enabled={enable}")
+        print(f"           CurrentValue = {current}   (factory default = {default})")
+
+        if form == 0x02:  # enumeration
+            n = struct.unpack_from("<H", data, off)[0]; off += 2
+            vals = []
+            for _ in range(n):
+                v, off = _read_dpv(data, off, dtype)
+                vals.append(v)
+            shown = ", ".join(str(v) for v in vals[:24])
+            more = " …" if len(vals) > 24 else ""
+            print(f"           FormEnum ({n} allowed): {shown}{more}")
+        elif form == 0x01:  # range
+            vmin, off = _read_dpv(data, off, dtype)
+            vmax, off = _read_dpv(data, off, dtype)
+            vstep, off = _read_dpv(data, off, dtype)
+            print(f"           FormRange: min={vmin} max={vmax} step={vstep}")
+        else:
+            print("           Form: none")
+    except (struct.error, IndexError):
+        hex_dump = data.hex()
+        print(f"        -> 0x{code:04X} {label}: could not decode "
+              f"({len(data)} bytes), raw = {hex_dump}")
+
+
 # ---------------------------------------------------------------------------
 # Diagnostic sequence
 # ---------------------------------------------------------------------------
@@ -461,20 +550,25 @@ def run_probe(pid: int | None, do_sdio: bool = True):
         if rc != PTP_RC_OK:
             rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x00C8])
         print(f"[4] SDIO_GetExtDeviceInfo(0x9202)-> {rc_str(rc)} ({len(data)} bytes)")
+        if rc == PTP_RC_OK and data:
+            decode_ext_device_info(data)
 
         # 3c) SDIO Connect phase 3 - finalize the handshake.
         rc, data = dev.transaction(OP_SDIO_CONNECT, params=[3, 0, 0])
         extra = f" ({len(data)} bytes data)" if data else ""
         print(f"[3] SDIO_Connect(0x9201) ph3     -> {rc_str(rc)}{extra}")
 
-        # 5) GetExtDevicePropDesc (read a few safe descriptors)
-        for code in (0x5013, 0xD211, 0xD241):
+        # 5) GetExtDevicePropDesc - read and decode a few safe descriptors
+        #    (current value + allowed values). Read-only.
+        print("\n[5] GetExtDevicePropDesc (decoded):")
+        for code in (0x5013, 0xD211, 0xD241, 0xD242):
             rc, data = dev.transaction(
                 OP_SDIO_GET_EXT_DEVICE_PROP_DESC, params=[code]
             )
-            name = PROP_NAMES.get(code, f"0x{code:04X}")
-            print(f"[5] GetExtDevicePropDesc {name:<28} "
+            print(f"    0x{code:04X} {prop_name(code):<26} "
                   f"-> {rc_str(rc)} ({len(data)} bytes)")
+            if rc == PTP_RC_OK:
+                decode_prop_desc(code, data)
 
     finally:
         # Clean session close (read-only).
