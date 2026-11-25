@@ -195,6 +195,24 @@ puis ferme la session.
 > le boîtier est en mode Photo). Chaque phase `SDIO_Connect` renvoie une courte phase
 > DATA à consommer avant le RESPONSE, et `param2`/`param3` doivent valoir `0`.
 
+### Résultats de contrôle & d'écriture (validés en direct, A6700 fw 2.00)
+
+Les écritures de session ont été confirmées sur boîtier réel :
+
+- **Le déclenchement fonctionne.** `ControlDevice(0x9207)` sur `s1_button (0xD2C1)`,
+  `s2_button (0xD2C2)` et `movie_rec_button (0xD2C8)` (valeur press `2`, release `1`)
+  renvoient tous `OK`. Le contrôle USB complet de la capture multi-vues et du
+  démarrage/arrêt vidéo est fonctionnel.
+- **`GetExtDevicePropValue (0x9204)` non supporté** sur le dataset v300 (`0x2005`) ;
+  les valeurs courantes se lisent dans le flux `GetAllExtDevicePropInfo (0x9209)`
+  (~8019 octets, 122 propriétés actives en mode Vidéo).
+- **Verrou applicatif HAITA sur `aspect_ratio (0xD211)`.**
+  `SetExtDevicePropValue(0xD211) <- 1` (3:2) renvoie `OK`, mais la valeur relue via
+  `0x9209` reste à `2` (16:9) en mode Vidéo. La commande est **acceptée puis
+  silencieusement ignorée** : le HAITA Feature Manager (`REC_MOVIE_ASPECT_RATIO_NOT_16_9`)
+  impose le 16:9 en film dans `appFw.so`, au-dessus de la couche PTP. L'Open Gate 3:2
+  vidéo n'est donc **pas** atteignable par une simple écriture de propriété.
+
 ---
 
 ## 6. Méthodologie d'extraction

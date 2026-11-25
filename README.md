@@ -200,11 +200,24 @@ runs the read-only `SDIO_GetAllExtDevicePropInfo (0x9209)` to show which video
 >
 > ✅ **Validated live (A6700, firmware 2.00).** The full read-only sequence was
 > confirmed on real hardware: `SDIO_Connect(0x9201)` ph1/ph2/ph3 each return
-> `OK (8 bytes data)`, `SDIO_GetExtDeviceInfo(0x9202)` returns ~826 bytes, and
-> `GetExtDevicePropDesc` decodes the current value + allowed values (e.g.
-> `still_capture_mode`, `aspect_ratio`). `file_format_movie` returns an empty
-> descriptor when the camera is in Photo mode. The probe also prints an endpoint
-> `clear_halt` cleanup and a decoded list of the exposed DeviceProp / control codes.
+> `OK (8 bytes data)`, `SDIO_GetExtDeviceInfo(0x9202)` returns ~826 bytes,
+> `GetAllExtDevicePropInfo(0x9209)` returns ~8019 bytes (122 active properties in
+> Video mode), and `GetExtDevicePropDesc` decodes the current value + allowed values
+> (e.g. `still_capture_mode` as a clean enum, `aspect_ratio`). `GetExtDevicePropValue
+> (0x9204)` is **not supported** on this dataset (`0x2005`), so current values are
+> read from the `0x9209` stream.
+>
+> ✅ **Control validated (session-only writes).** `ControlDevice(0x9207)` triggers
+> were confirmed `OK` on hardware: **S1** (`0xD2C1`) + **S2** (`0xD2C2`) press/release
+> (multi-frame capture) and **movie record** (`0xD2C8`) start/stop. Full USB control
+> of capture and recording works.
+>
+> 🔒 **Application-level HAITA lock proven.** `SetExtDevicePropValue(0xD211)` with `1`
+> (3:2) returns `OK`, yet re-reading via `0x9209` shows `aspect_ratio` stays at `2`
+> (16:9) in Video mode. This experimentally confirms that the **HAITA Feature Manager**
+> (`REC_MOVIE_ASPECT_RATIO_NOT_16_9`) filters the 3:2 switch at the application layer
+> (`appFw.so`), beyond the PTP protocol: the command is accepted then silently ignored.
+> Open Gate 3:2 video is **not** reachable by a simple property write.
 
 ### Expected output (example, A6700 firmware 2.00)
 
@@ -337,6 +350,42 @@ python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-second
 
 ---
 
+## 🎞️ Automated multi-exposure (`multi_exposure.py`)
+
+Built on the **validated** session-only control commands (`still_capture_mode`
+0x5013 + `ControlDevice` 0x9207 S1/S2), `multi_exposure.py` captures **N frames at a
+controlled interval** and can optionally **stack** them locally (average = classic
+multi-exposure blend, or lighten = star-trail style). It also requires
+`--confirm-session-write` and takes real pictures.
+
+```powershell
+# 5 frames, 1s apart (AF before each shot)
+python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
+
+# Continuous/bracket drive mode, no AF, then pull the new frames over PTP and
+# stack them into a single multi-exposure image
+python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
+    --download-dir out/ --stack out/multi.png --stack-mode average
+
+# Star-trail style stack from a folder you copied off the SD card
+python multi_exposure.py --confirm-session-write --shots 1 \
+    --stack-dir ./frames --stack trails.png --stack-mode lighten
+```
+
+| Option | Purpose |
+|---|---|
+| `--shots N` / `--interval S` | capture N frames, S seconds apart |
+| `--no-af` | skip the S1 (AF) half-press; S2 full-press only |
+| `--drive-value V` | set `still_capture_mode` (0x5013) first (continuous/bracket enum value) |
+| `--download-dir DIR` | pull the newly captured objects over PTP (read-only `GetObject`) |
+| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | stack images (`average` or `lighten`) |
+
+Stacking needs Pillow + numpy (`pip install pillow numpy`); without them, capture
+still works and you can stack the SD-card files yourself. Image download over PTP is
+best-effort (if the body doesn't enumerate objects in this mode, copy from the card).
+
+---
+
 ## 💬 Community & ideas
 
 Ideas for features or for cameras to support are very welcome:
@@ -370,8 +419,9 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 A6700-Remote-Tools/
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
+├── multi_exposure.py    # automated multi-exposure capture + optional stacking
 ├── sony_codes.py        # generated PTP code dictionaries (protocol constants)
-├── requirements.txt   # Python dependencies (pyusb)
+├── requirements.txt   # Python dependencies (pyusb; pillow/numpy optional)
 ├── .gitignore         # strict exclusion of firmware binaries
 ├── LICENSE            # MIT license
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # contribution guide (EN / FR)

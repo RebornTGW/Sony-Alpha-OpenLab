@@ -209,11 +209,24 @@ montrer quelles propriétés vidéo `0xD2xx` le boîtier remonte dans son flux g
 > ✅ **Validé en direct (A6700, firmware 2.00).** La séquence complète en lecture
 > seule a été confirmée sur boîtier réel : `SDIO_Connect(0x9201)` ph1/ph2/ph3
 > renvoient chacune `OK (8 bytes data)`, `SDIO_GetExtDeviceInfo(0x9202)` renvoie
-> ~826 octets, et `GetExtDevicePropDesc` décode la valeur courante + les valeurs
-> autorisées (ex. `still_capture_mode`, `aspect_ratio`). `file_format_movie` renvoie
-> un descripteur vide quand le boîtier est en mode Photo. La sonde affiche aussi un
-> nettoyage `clear_halt` des endpoints et la liste décodée des codes DeviceProp /
-> contrôle exposés.
+> ~826 octets, `GetAllExtDevicePropInfo(0x9209)` renvoie ~8019 octets (122 propriétés
+> actives en mode Vidéo), et `GetExtDevicePropDesc` décode la valeur courante + les
+> valeurs autorisées (ex. `still_capture_mode` en énum propre, `aspect_ratio`).
+> `GetExtDevicePropValue (0x9204)` est **non supporté** sur ce dataset (`0x2005`) ;
+> les valeurs courantes se lisent donc dans le flux `0x9209`.
+>
+> ✅ **Contrôle validé (écritures de session).** Les déclenchements `ControlDevice
+> (0x9207)` ont été confirmés `OK` sur boîtier : **S1** (`0xD2C1`) + **S2** (`0xD2C2`)
+> press/release (capture multi-vues) et **enregistrement vidéo** (`0xD2C8`)
+> start/stop. Le contrôle USB complet de la capture et de l'enregistrement fonctionne.
+>
+> 🔒 **Verrou applicatif HAITA prouvé.** `SetExtDevicePropValue(0xD211)` avec `1`
+> (3:2) renvoie `OK`, mais la relecture via `0x9209` montre qu'`aspect_ratio` reste à
+> `2` (16:9) en mode Vidéo. Cela confirme expérimentalement que le **HAITA Feature
+> Manager** (`REC_MOVIE_ASPECT_RATIO_NOT_16_9`) filtre la bascule 3:2 au niveau
+> applicatif (`appFw.so`), au-delà du protocole PTP : la commande est acceptée puis
+> silencieusement ignorée. L'Open Gate 3:2 vidéo **n'est pas** atteignable par une
+> simple écriture de propriété.
 
 ### Sortie attendue (exemple, A6700 firmware 2.00)
 
@@ -350,6 +363,43 @@ python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-second
 
 ---
 
+## 🎞️ Multi-exposition automatisée (`multi_exposure.py`)
+
+Bâti sur les commandes de contrôle de session **validées** (`still_capture_mode`
+0x5013 + `ControlDevice` 0x9207 S1/S2), `multi_exposure.py` capture **N vues à
+intervalle contrôlé** et peut éventuellement les **empiler** localement (average =
+fusion multi-exposition classique, ou lighten = filé d'étoiles). Il exige aussi
+`--confirm-session-write` et prend de vraies photos.
+
+```powershell
+# 5 vues, 1 s d'intervalle (AF avant chaque prise)
+python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
+
+# Mode drive continu/bracket, sans AF, puis récupération PTP des nouvelles vues et
+# empilement en une seule image de multi-exposition
+python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
+    --download-dir out/ --stack out/multi.png --stack-mode average
+
+# Empilement type filé d'étoiles depuis un dossier copié de la carte SD
+python multi_exposure.py --confirm-session-write --shots 1 \
+    --stack-dir ./frames --stack trails.png --stack-mode lighten
+```
+
+| Option | Rôle |
+|---|---|
+| `--shots N` / `--interval S` | capture N vues, espacées de S secondes |
+| `--no-af` | saute le demi-appui S1 (AF) ; S2 pleine pression seulement |
+| `--drive-value V` | règle `still_capture_mode` (0x5013) d'abord (valeur d'énum continu/bracket) |
+| `--download-dir DIR` | récupère les objets nouvellement capturés via PTP (`GetObject`, lecture seule) |
+| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | empile les images (`average` ou `lighten`) |
+
+L'empilement nécessite Pillow + numpy (`pip install pillow numpy`) ; sans eux, la
+capture fonctionne quand même et vous empilez les fichiers de la carte vous-même. Le
+téléchargement PTP est best-effort (si le boîtier n'énumère pas les objets dans ce
+mode, copiez depuis la carte).
+
+---
+
 ## 💬 Communauté & idées
 
 Les idées de fonctionnalités ou de boîtiers à prendre en charge sont les bienvenues :
@@ -383,8 +433,9 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 A6700-Remote-Tools/
 ├── probe_a6700.py       # sonde diagnostic USB lecture seule
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
+├── multi_exposure.py    # capture multi-exposition automatisée + empilement optionnel
 ├── sony_codes.py        # dictionnaires de codes PTP (constantes de protocole)
-├── requirements.txt   # dépendances Python (pyusb)
+├── requirements.txt   # dépendances Python (pyusb ; pillow/numpy optionnels)
 ├── .gitignore         # exclusion stricte des binaires/firmware
 ├── LICENSE            # licence MIT
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # guide de contribution (EN / FR)
