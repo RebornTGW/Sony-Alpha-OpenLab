@@ -369,6 +369,14 @@ python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value
 
 # OFFLINE: stack a folder (no camera, no --confirm-session-write needed)
 python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
+
+# Interactive double exposure: shoot frame 1, reframe, Enter for frame 2, auto-stack
+python multi_exposure.py --confirm-session-write --interactive --shots 2 \
+    --download-dir out/ --stack out/double.png --stack-mode screen
+
+# Real-time Live View overlay (align frame 2 over frame 1 live; Space to capture)
+python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
+    --download-dir out/ --stack out/double.png --stack-mode screen --overlay-opacity 0.5
 ```
 
 | Option | Purpose |
@@ -377,7 +385,16 @@ python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode li
 | `--no-af` | skip the S1 (AF) half-press; S2 full-press only |
 | `--drive-value V` | set `still_capture_mode` (0x5013) first (continuous/bracket enum value) |
 | `--download-dir DIR` | auto-download each frame via the Sony PC-save handle `0xFFFFC001` (read-only `GetObject`) |
-| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | stack images (`average` or `lighten`) |
+| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | stack images: `average`, `lighten`, or `screen` |
+| `--interactive` | step-by-step: shoot frame 1, pause to reframe, Enter for each next frame, then stack |
+| `--live-overlay` / `--overlay-opacity` | live window blending the feed (`0xFFFFC002`) over frame 1; Space captures |
+
+**Native double-exposure experience.** `--live-overlay` reproduces the Fujifilm/Canon
+in-camera flow: shoot frame 1, see the real-time Live View superimposed over it to
+align frame 2, press **Space** to capture, and the final blend is generated instantly.
+`screen` (`1-(1-A)(1-B)`) is the classic double-exposure blend; `lighten` keeps the
+brightest pixels. The overlay window uses `tkinter` (bundled with Python) + Pillow —
+no extra dependency.
 
 **Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose
 `GetObjectHandles`; it places the last captured image on the special Sony handle

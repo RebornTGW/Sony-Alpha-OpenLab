@@ -25,7 +25,10 @@ propriétaire du firmware.
   tous confirmés fonctionnels.
 - **Multi-exposition automatisée** (`multi_exposure.py`) — capture de N vues à
   intervalle contrôlé, avec téléchargement d'images optionnel en lecture seule et
-  empilement local (average = fusion multi-exposition, lighten = filé d'étoiles).
+  empilement local (average, lighten, screen).
+- **Expérience double exposition native** — mode interactif pas-à-pas et fenêtre
+  d'aperçu Live View superposé en temps réel (aligner la Vue 2 sur la Vue 1, Espace
+  pour déclencher, fusion instantanée), reproduisant le flux natif Fujifilm/Canon.
 - **Documentation de référence** — vue d'ensemble du protocole, dictionnaire des
   codes de propriété et de contrôle, et page de résultats expérimentaux, le tout
   bilingue (EN/FR).

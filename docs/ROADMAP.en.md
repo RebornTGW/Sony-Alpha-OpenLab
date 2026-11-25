@@ -21,7 +21,10 @@ describes **capabilities and goals only** — no proprietary firmware internals.
   full-press (shutter) and movie start/stop over USB, all confirmed working.
 - **Automated multi-exposure** (`multi_exposure.py`) — capture N frames at a
   controlled interval, with optional read-only image download and local stacking
-  (average = multi-exposure blend, lighten = star trails).
+  (average, lighten, screen).
+- **Native double-exposure experience** — step-by-step interactive mode and a
+  real-time Live View overlay window (align frame 2 over frame 1, Space to capture,
+  instant blend), reproducing the Fujifilm/Canon in-camera flow.
 - **Reference documentation** — protocol overview, a dictionary of device-property
   and control codes, and an experimental results page, all bilingual (EN/FR).
 - **Safety model** — a read-only-by-default design with an explicit opt-in gate for

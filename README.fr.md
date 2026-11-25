@@ -382,6 +382,14 @@ python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value
 
 # HORS-LIGNE : empiler un dossier (sans boîtier, sans --confirm-session-write)
 python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
+
+# Double exposition interactive : Vue 1, recadrage, Entrée pour la Vue 2, fusion auto
+python multi_exposure.py --confirm-session-write --interactive --shots 2 \
+    --download-dir out/ --stack out/double.png --stack-mode screen
+
+# Aperçu Live View superposé en temps réel (aligner la Vue 2 ; Espace = déclencher)
+python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
+    --download-dir out/ --stack out/double.png --stack-mode screen --overlay-opacity 0.5
 ```
 
 | Option | Rôle |
@@ -390,7 +398,16 @@ python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode li
 | `--no-af` | saute le demi-appui S1 (AF) ; S2 pleine pression seulement |
 | `--drive-value V` | règle `still_capture_mode` (0x5013) d'abord (valeur d'énum continu/bracket) |
 | `--download-dir DIR` | télécharge auto chaque vue via le handle Sony `0xFFFFC001` (`GetObject`, lecture seule) |
-| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | empile les images (`average` ou `lighten`) |
+| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | empile les images : `average`, `lighten` ou `screen` |
+| `--interactive` | pas-à-pas : Vue 1, pause pour recadrer, Entrée pour chaque vue suivante, puis fusion |
+| `--live-overlay` / `--overlay-opacity` | fenêtre live superposant le flux (`0xFFFFC002`) sur la Vue 1 ; Espace déclenche |
+
+**Expérience double exposition native.** `--live-overlay` reproduit le flux natif
+Fujifilm/Canon : prendre la Vue 1, voir le Live View superposé en temps réel pour
+aligner la Vue 2, appuyer sur **Espace** pour déclencher, et la fusion finale est
+générée instantanément. `screen` (`1-(1-A)(1-B)`) est la fusion double-exposition
+classique ; `lighten` garde les pixels les plus clairs. La fenêtre utilise `tkinter`
+(fourni avec Python) + Pillow — aucune dépendance supplémentaire.
 
 **Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
 `GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial

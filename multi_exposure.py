@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import io
 import os
 import struct
 import sys
@@ -68,6 +69,8 @@ OP_GET_OBJECT = 0x1009
 # via GetObjectInfo / GetObject. Requires "Save Destination: PC+Camera" or "PC only"
 # on the camera.
 SONY_PC_SAVE_HANDLE = 0xFFFFC001
+# Live View stream object handle (read repeatedly via GetObject for a live preview).
+SONY_LIVEVIEW_HANDLE = 0xFFFFC002
 
 
 def _u16(v: int) -> bytes:
@@ -233,11 +236,19 @@ def stack_images(paths, out_path, mode="average"):
         arr = np.asarray(im, dtype=np.float64)
         if acc is None:
             acc = np.zeros_like(arr) if mode == "average" else arr.copy()
+            if mode != "average":
+                n += 1
+                continue
         if mode == "average":
             acc += arr
             n += 1
         elif mode == "lighten":
             acc = np.maximum(acc, arr)
+            n += 1
+        elif mode == "screen":
+            # screen: 1 - (1-A)*(1-B); classic double-exposure blend (Fuji/Canon).
+            acc = 255.0 - (255.0 - acc) * (255.0 - arr) / 255.0
+            n += 1
         else:
             print(f"[stack ] unknown mode {mode}")
             return False
@@ -248,9 +259,154 @@ def stack_images(paths, out_path, mode="average"):
         acc /= max(n, 1)
     from PIL import Image as _Image
     _Image.fromarray(acc.clip(0, 255).astype("uint8")).save(out_path)
-    print(f"[stack ] {mode} of {n if mode=='average' else len(paths)} image(s) "
-          f"-> {out_path}")
+    print(f"[stack ] {mode} of {n} image(s) -> {out_path}")
     return True
+
+
+# ---------------------------------------------------------------------------
+# Live View + interactive double-exposure
+# ---------------------------------------------------------------------------
+
+def fetch_liveview(dev):
+    """Read one Live View frame from the Sony live-view handle (0xFFFFC002) and
+    return it as a PIL RGB image, or None. Read-only GetObject."""
+    try:
+        rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_LIVEVIEW_HANDLE])
+    except PtpError:
+        return None
+    if rc != PTP_RC_OK or not data:
+        return None
+    i = data.find(b"\xff\xd8")  # skip any Sony header, find the JPEG SOI
+    if i < 0:
+        return None
+    try:
+        from PIL import Image
+        return Image.open(io.BytesIO(data[i:])).convert("RGB")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def interactive_capture(dev, shots, af, download_dir, out_path, stack_mode):
+    """Step-by-step double exposure: capture frame 1, then wait for the user to
+    reframe before each next frame, then stack immediately."""
+    download_dir = download_dir or "me_frames"
+    os.makedirs(download_dir, exist_ok=True)
+    out_path = out_path or "multi_exposure.png"
+    saved = []
+    for i in range(1, shots + 1):
+        if i == 1:
+            print(f"[inter ] capturing frame 1/{shots} (base)...")
+        else:
+            try:
+                input(f"[inter ] reframe the next subject, then press Enter to "
+                      f"capture frame {i}/{shots} (Ctrl+C to stop)...")
+            except (EOFError, KeyboardInterrupt):
+                print("\n[inter ] stopped by user.")
+                break
+        capture_one(dev, af=af)
+        time.sleep(0.4)
+        p = fetch_pc_save_object(dev, download_dir, i)
+        if p:
+            saved.append(p)
+        else:
+            print("         (no image on 0xFFFFC001 - check Save Destination)")
+    if len(saved) >= 2:
+        stack_images(saved, out_path, mode=stack_mode)
+    else:
+        print("[inter ] need >= 2 downloaded frames to stack.")
+    return saved
+
+
+def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend):
+    """Capture frame 1, then open a light tkinter window showing the live Sony feed
+    (0xFFFFC002) blended over frame 1 in real time, so you can align the next frame.
+    Space triggers the next capture; Esc/q quits. Final stack uses `blend`."""
+    try:
+        import tkinter as tk
+        from PIL import Image, ImageTk
+        import numpy as np
+    except ImportError:
+        print("[live  ] --live-overlay needs tkinter + Pillow + numpy "
+              "(pip install pillow numpy; tkinter ships with Python).")
+        return []
+
+    download_dir = download_dir or "me_frames"
+    os.makedirs(download_dir, exist_ok=True)
+    out_path = out_path or "multi_exposure.png"
+
+    print(f"[live  ] capturing frame 1/{shots} (base)...")
+    capture_one(dev, af=af)
+    time.sleep(0.4)
+    base_path = fetch_pc_save_object(dev, download_dir, 1)
+    if not base_path:
+        print("[live  ] no base image on 0xFFFFC001 (check Save Destination).")
+        return []
+    base = Image.open(base_path).convert("RGB")
+    # Downscale the preview for responsiveness (keep the full-res file for stacking).
+    pw = min(960, base.width)
+    ph = int(base.height * pw / base.width)
+    base_small = base.resize((pw, ph))
+    base_arr = np.asarray(base_small, dtype=np.float64)
+
+    state = {"saved": [base_path], "shot": 2, "busy": False}
+
+    root = tk.Tk()
+    root.title("A6700 live double-exposure - Space=capture, Esc=quit")
+    label = tk.Label(root)
+    label.pack()
+    status = tk.Label(root, text="Align the next subject, then press Space.")
+    status.pack()
+
+    def blend_preview(lv):
+        lv = lv.resize((pw, ph))
+        b = (np.asarray(lv, dtype=np.float64) * float(opacity)).clip(0, 255)
+        if blend == "screen":
+            out = 255.0 - (255.0 - base_arr) * (255.0 - b) / 255.0
+        else:  # lighten
+            out = np.maximum(base_arr, b)
+        return Image.fromarray(out.clip(0, 255).astype("uint8"))
+
+    def refresh():
+        if not root.winfo_exists():
+            return
+        lv = fetch_liveview(dev)
+        if lv is not None:
+            img = ImageTk.PhotoImage(blend_preview(lv))
+            label.config(image=img)
+            label.image = img
+        else:
+            status.config(text="Waiting for Live View (0xFFFFC002)...")
+        root.after(120, refresh)
+
+    def do_capture(_=None):
+        if state["busy"] or state["shot"] > shots:
+            return
+        state["busy"] = True
+        status.config(text=f"Capturing frame {state['shot']}/{shots}...")
+        root.update_idletasks()
+        capture_one(dev, af=af)
+        time.sleep(0.4)
+        p = fetch_pc_save_object(dev, download_dir, state["shot"])
+        if p:
+            state["saved"].append(p)
+        state["shot"] += 1
+        state["busy"] = False
+        if state["shot"] > shots:
+            root.destroy()
+        else:
+            status.config(text=f"Align subject {state['shot']}, press Space.")
+
+    root.bind("<space>", do_capture)
+    root.bind("<Escape>", lambda e: root.destroy())
+    root.bind("q", lambda e: root.destroy())
+    root.after(200, refresh)
+    root.mainloop()
+
+    if len(state["saved"]) >= 2:
+        stack_images(state["saved"], out_path, mode=blend)
+    else:
+        print("[live  ] need >= 2 frames to stack.")
+    return state["saved"]
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +441,18 @@ def main():
                     help="Stack images into this output file.")
     ap.add_argument("--stack-dir", default=None,
                     help="Directory of images to stack (defaults to --download-dir).")
-    ap.add_argument("--stack-mode", choices=("average", "lighten"),
+    ap.add_argument("--stack-mode", choices=("average", "lighten", "screen"),
                     default="average",
-                    help="average = multi-exposure blend; lighten = max (star trails).")
+                    help="average = multi-exposure blend; lighten = max (star trails); "
+                         "screen = 1-(1-A)(1-B) (Fuji/Canon double-exposure look).")
+    ap.add_argument("--interactive", action="store_true",
+                    help="Step-by-step: capture frame 1, wait for Enter to reframe "
+                         "before each next frame, then stack immediately.")
+    ap.add_argument("--live-overlay", action="store_true",
+                    help="Open a window showing the live feed (0xFFFFC002) blended "
+                         "over frame 1 in real time; Space captures. Needs tkinter+Pillow.")
+    ap.add_argument("--overlay-opacity", type=float, default=0.5,
+                    help="Live-overlay opacity of the live feed over frame 1 (0..1).")
     args = ap.parse_args()
 
     # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
@@ -321,23 +486,32 @@ def main():
             set_drive_mode(dev, args.drive_value)
             time.sleep(0.2)
 
-        # Capture, auto-downloading each frame from the Sony PC-save handle
-        # (0xFFFFC001) when --download-dir is set.
-        downloaded = capture_sequence(dev, args.shots, args.interval,
-                                      af=not args.no_af,
-                                      download_dir=args.download_dir)
-        time.sleep(0.3)
-
-        if args.stack:
-            src_dir = args.stack_dir or args.download_dir
-            if downloaded:
-                paths = downloaded
-            elif src_dir and os.path.isdir(src_dir):
-                paths = sorted(glob.glob(os.path.join(src_dir, "*")))
-            else:
-                paths = []
-                print("[stack ] no source images (use --download-dir or --stack-dir).")
-            stack_images(paths, args.stack, mode=args.stack_mode)
+        if args.live_overlay:
+            # Real-time Live View overlay over frame 1; Space captures the rest.
+            live_overlay(dev, args.shots, af=not args.no_af,
+                         download_dir=args.download_dir, out_path=args.stack,
+                         opacity=args.overlay_opacity, blend=args.stack_mode)
+        elif args.interactive:
+            # Step-by-step double exposure with a reframe pause between frames.
+            interactive_capture(dev, args.shots, af=not args.no_af,
+                                download_dir=args.download_dir, out_path=args.stack,
+                                stack_mode=args.stack_mode)
+        else:
+            # Timed sequence, auto-downloading each frame from 0xFFFFC001.
+            downloaded = capture_sequence(dev, args.shots, args.interval,
+                                          af=not args.no_af,
+                                          download_dir=args.download_dir)
+            time.sleep(0.3)
+            if args.stack:
+                src_dir = args.stack_dir or args.download_dir
+                if downloaded:
+                    paths = downloaded
+                elif src_dir and os.path.isdir(src_dir):
+                    paths = sorted(glob.glob(os.path.join(src_dir, "*")))
+                else:
+                    paths = []
+                    print("[stack ] no source images (use --download-dir/--stack-dir).")
+                stack_images(paths, args.stack, mode=args.stack_mode)
 
     except PtpError as e:
         sys.exit(f"[ERROR] {e}")
