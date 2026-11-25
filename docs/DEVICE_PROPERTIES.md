@@ -1,5 +1,7 @@
 # Dictionnaire des `DevicePropCode` et codes de contrôle — Sony A6700
 
+**🌍 Langue : [English](DEVICE_PROPERTIES.en.md) · Français**
+
 Correspondance **code PTP → nom symbolique** du protocole de contrôle à distance
 (PTP standard + extension vendor Sony « SDIO ») du boîtier **ILCE-6700**.
 

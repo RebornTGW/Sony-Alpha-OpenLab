@@ -1,5 +1,7 @@
 # Protocole de contrôle à distance PTP / « SDIO » — Sony A6700 (ILCE-6700)
 
+**🌍 Langue : [English](PROTOCOL.en.md) · Français**
+
 Description technique du protocole de communication entre un hôte (PC / smartphone)
 et le boîtier **Sony A6700**, telle que reconstituée par **analyse statique
 indépendante**. Document de référence pour `probe_a6700.py`.

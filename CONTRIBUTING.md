@@ -1,74 +1,79 @@
-# Guide de contribution — A6700-Remote-Tools
+# Contributing — A6700-Remote-Tools
 
-Merci de votre intérêt ! Ce projet documente et teste le protocole de contrôle à
-distance du Sony A6700 à des fins **d'interopérabilité et d'étude**. Quelques règles
-simples garantissent qu'il reste propre, sûr et partageable publiquement.
+**🌍 Language: English · [Français](CONTRIBUTING.fr.md)**
 
-## 🔒 Règle n°1 — Aucun contenu de firmware
+Thanks for your interest! This project documents and tests the Sony A6700
+remote-control protocol for **interoperability and study**. Its scope is **strictly
+limited to two goals — Open Gate 3:2 and multi-exposure — with no permanent
+modification of the camera.** A few simple rules keep it clean, safe, and publicly
+shareable.
 
-**Ne commitez jamais** de fichier issu du firmware Sony ni de donnée binaire
-propriétaire, notamment :
+## 🔒 Rule #1 — No firmware content
 
-- firmware et bibliothèques : `*.so`, `*.bin`, `*.DAT`, `*.ko`, `*.elf`, `*.img` ;
-- firmwares décompressés, dumps, images partition, extraits de `.rodata`/`.data` ;
-- toute copie de code désassemblé reproduisant du code Sony.
+**Never commit** any file extracted from the Sony firmware or any proprietary binary
+data, in particular:
 
-Le `.gitignore` bloque déjà ces extensions, mais la vigilance reste de votre
-ressort. Ce qui est autorisé : les **constantes de protocole** (opcodes, codes de
-propriété, noms symboliques) et la **documentation** décrivant le protocole — ce
-sont des faits d'interopérabilité, pas du code redistribué.
+- firmware and libraries: `*.so`, `*.bin`, `*.DAT`, `*.ko`, `*.elf`, `*.img`;
+- decompressed firmware, dumps, partition images, `.rodata`/`.data` excerpts;
+- any copy of disassembled code reproducing Sony code.
 
-## 🛡️ Règle n°2 — Priorité à la lecture seule
+The `.gitignore` already blocks these extensions, but vigilance is on you. What is
+allowed: **protocol constants** (opcodes, property codes, symbolic names) and
+**documentation** describing the protocol — these are interoperability facts, not
+redistributed code.
 
-L'outil de référence (`probe_a6700.py`) est **strictement en lecture seule** et le
-reste par défaut. Toute contribution introduisant une opération d'écriture ou de
-contrôle (`SetExtDevicePropValue` 0x9205, `ControlDevice` 0x9207, `SendObject`,
-formatage, mise à jour firmware…) doit :
+## 🛡️ Rule #2 — Read-only first
 
-1. être **désactivée par défaut** et protégée par un drapeau explicite
-   (ex. `--enable-write`) avec confirmation ;
-2. ne jamais être ajoutée à la liste blanche `READ_ONLY_OPS` ;
-3. documenter clairement l'effet matériel sur le boîtier.
+The reference tool (`probe_a6700.py`) is **strictly read-only** and stays that way by
+default. Any contribution introducing a write or control operation
+(`SetExtDevicePropValue` 0x9205, `ControlDevice` 0x9207, `SendObject`, formatting,
+firmware update…) must:
 
-Rappel : S1/S2/Movie Rec et toute action `ControlDevice` modifient l'état physique
-du boîtier (déclenchement, enregistrement). Traitez-les avec prudence.
+1. be **disabled by default** and guarded by an explicit flag (e.g. `--enable-write`)
+   with confirmation;
+2. never be added to the `READ_ONLY_OPS` whitelist;
+3. clearly document its physical effect on the camera;
+4. stay **within scope** (Open Gate 3:2 / multi-exposure) and never cause any
+   **permanent modification** of settings or firmware.
 
-## 🧪 Règle n°3 — Tests responsables
+Reminder: S1/S2/Movie Rec and any `ControlDevice` action change the camera's
+physical state (shutter, recording). Handle them with care.
 
-- Testez sur **votre propre matériel**, batterie chargée, sans carte contenant des
-  données importantes.
-- Préférez le mode `--no-sdio` pour un premier contact.
-- Signalez dans vos PR le modèle, la version de firmware et l'OS utilisés.
+## 🧪 Rule #3 — Responsible testing
 
-## 🔧 Mise en place de l'environnement
+- Test on **your own hardware**, battery charged, without a card holding important
+  data.
+- Prefer `--no-sdio` for a first contact.
+- In your PR, report the model, firmware version, and OS used.
+
+## 🔧 Environment setup
 
 ```bash
 python -m venv .venv
-# Windows : .\.venv\Scripts\activate   |   Linux/macOS : source .venv/bin/activate
+# Windows: .\.venv\Scripts\activate   |   Linux/macOS: source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Sous Windows, installez le pilote WinUSB sur l'interface PTP du boîtier via Zadig
-(voir [README.md](README.md)).
+On Windows, install the WinUSB driver on the camera's PTP interface via Zadig
+(see [README.md](README.md)).
 
-## 📐 Style de code
+## 📐 Code style
 
-- Python 3.9+, conforme **PEP 8** ; largeur de ligne ~100 colonnes.
-- Noms explicites ; docstrings en tête de module et de fonction publique.
-- Les constantes de protocole (opcodes, codes) sont regroupées et nommées.
-- Évitez les dépendances superflues : le cœur ne doit dépendre que de `pyusb`.
+- Python 3.9+, **PEP 8** compliant; line width ~100 columns.
+- Explicit names; docstrings and comments **in English** (the code language).
+- Protocol constants (opcodes, codes) are grouped and named.
+- Avoid unnecessary dependencies: the core must only depend on `pyusb`.
 
-## 🔀 Processus de PR
+## 🔀 PR process
 
-1. Forkez et créez une branche : `git checkout -b feat/ma-fonction`.
-2. Un commit = une intention. Messages à l'impératif, en anglais ou français
-   cohérent (ex. `add GetExtDeviceInfo parser`).
-3. Vérifiez : `python -c "import ast; ast.parse(open('probe_a6700.py').read())"`
-   et, si possible, un test réel en lecture seule.
-4. Confirmez qu'**aucun binaire** n'est ajouté : `git status` + `git ls-files`.
-5. Ouvrez la PR en décrivant le comportement et l'impact éventuel sur le boîtier.
+1. Fork and create a branch: `git checkout -b feat/my-feature`.
+2. One commit = one intent. Imperative messages (e.g. `add GetExtDeviceInfo parser`).
+3. Verify: `python -c "import ast; ast.parse(open('probe_a6700.py').read())"`
+   and, if possible, a real read-only test.
+4. Confirm **no binary** was added: `git status` + `git ls-files`.
+5. Open the PR describing the behavior and any impact on the camera.
 
-## 📄 Licence
+## 📄 License
 
-En contribuant, vous acceptez que votre contribution soit distribuée sous licence
-**MIT** (voir [LICENSE](LICENSE)).
+By contributing, you agree that your contribution is distributed under the **MIT**
+license (see [LICENSE](LICENSE)).
