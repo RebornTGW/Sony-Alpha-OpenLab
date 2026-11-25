@@ -194,6 +194,15 @@ seuls les codes de **lecture** sont émis par `probe_a6700.py` ; les « boutons 
 
 ---
 
+## 📚 Documentation
+
+- [`docs/PROTOCOL.md`](docs/PROTOCOL.md) — architecture du protocole PTP / « SDIO »
+  de l'A6700 (transport, opérations, propriétés, séquence de dialogue).
+- [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) — table complète des
+  **386 codes** `DevicePropCode` / contrôle avec leurs noms symboliques.
+- [`CONTRIBUTING.md`](CONTRIBUTING.md) — règles de contribution (dont l'interdiction
+  stricte de tout contenu de firmware et la priorité lecture seule).
+
 ## 📁 Contenu du dépôt
 
 ```
@@ -202,6 +211,10 @@ A6700-Remote-Tools/
 ├── requirements.txt   # dépendances Python (pyusb)
 ├── .gitignore         # exclusion stricte des binaires/firmware
 ├── LICENSE            # licence MIT
+├── CONTRIBUTING.md    # guide de contribution
+├── docs/
+│   ├── PROTOCOL.md           # architecture protocole PTP/SDIO
+│   └── DEVICE_PROPERTIES.md  # table des 386 codes
 └── README.md
 ```
 
