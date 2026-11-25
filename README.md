@@ -171,11 +171,14 @@ python probe_a6700.py --sdk-handshake
 python probe_a6700.py --pid 0x0E78
 ```
 
-The probe reads property values with `GetExtDevicePropValue (0x9204)` in step
-`[5b]`, and decodes the `aspect_ratio` / `recording_setting_movie` /
-`recording_frame_rate_setting_movie` entries straight from the `0x9209` stream in
-`[4c]`. `--sdk-handshake` is the one exception to the read-only default (see the note
-above); everything else the probe does stays read-only.
+On the A6700, `GetExtDevicePropValue (0x9204)` returns `0x2005` (Operation Not
+Supported), so the probe reads the **real current values from the
+`GetAllExtDevicePropInfo (0x9209)` stream** in step `[5b]` (for `still_capture_mode`,
+`aspect_ratio`, `file_format_movie`, `recording_setting_movie`,
+`recording_frame_rate_setting_movie`), decodes selected entries in `[4c]`, and also
+probes `GetExtDeviceProp (0x9251)` read-only in `[5c]`. `--sdk-handshake` is the one
+exception to the read-only default (see the note above); everything else the probe
+does stays read-only.
 
 Code lists (vendor opcodes in `[2b]`, exposed properties in `[4]`/`[4b]`) are
 **compact by default**; pass `--verbose` for the full per-code listing. Step `[4b]`
@@ -316,12 +319,16 @@ python experiment_a6700.py --confirm-session-write --test-aspect-3-2
 
 # Controlled multi-frame trigger: optional drive-mode set + S1/S2 sequence
 python experiment_a6700.py --confirm-session-write --test-burst-trigger --drive-value 0x2
+
+# Record a short clip to inspect the resulting MP4 resolution on the SD card
+python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-seconds 2
 ```
 
 | Experiment | What it does (session-only) |
 |---|---|
-| `--test-aspect-3-2` | `SetExtDevicePropValue(0x9205)` writes `1` (3:2) to `aspect_ratio` (0xD211), re-reads the value and prints the PTP result (`0x2001 OK` vs an error = blocked by the capability gate). |
+| `--test-aspect-3-2` | reads `aspect_ratio` (0xD211) current value from the `0x9209` stream, `SetExtDevicePropValue(0x9205)` writes `1` (3:2), re-reads it, and reports whether the body actually switched `2`→`1` or accepted-then-ignored it. |
 | `--test-burst-trigger` | optionally sets `still_capture_mode` (0x5013) via `--drive-value`, then runs `ControlDevice(0x9207)`: `S1` (0xD2C1) press/release + `S2` (0xD2C2) press/release. |
+| `--test-movie-rec` | toggles `movie_rec_button` (0xD2C8) via `ControlDevice(0x9207)` to start, waits `--rec-seconds`, then stops - so you can check the recorded MP4's real resolution (e.g. after `--test-aspect-3-2`). |
 
 > ⚠️ These writes change the camera's **live session state** (and `--test-burst-trigger`
 > **takes a picture**). They are volatile, but use them deliberately, on your own

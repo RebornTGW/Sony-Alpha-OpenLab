@@ -43,10 +43,10 @@ except ImportError:  # pragma: no cover
     sys.exit("[ERROR] pyusb is missing. Install it with: pip install pyusb")
 
 from probe_a6700 import (
-    PtpUsbDevice, PtpError, rc_str, prop_name, decode_prop_value,
+    PtpUsbDevice, PtpError, rc_str, prop_name, current_value_in_stream,
     PTP_RC_OK, READ_ONLY_OPS,
     OP_OPEN_SESSION, OP_CLOSE_SESSION, OP_SDIO_CONNECT,
-    OP_SDIO_GET_EXT_DEVICE_INFO, OP_SDIO_GET_EXT_DEVICE_PROP_VALUE,
+    OP_SDIO_GET_EXT_DEVICE_INFO, OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO,
     OP_SDIO_SET_REMOTE_SDK_INFO, OP_SDIO_SET_EXT_DEVICE_PROP_VALUE,
     OP_SDIO_CONTROL_DEVICE,
 )
@@ -56,6 +56,7 @@ PROP_ASPECT_RATIO = 0xD211
 PROP_STILL_CAPTURE_MODE = 0x5013
 CTRL_S1_BUTTON = 0xD2C1
 CTRL_S2_BUTTON = 0xD2C2
+CTRL_MOVIE_REC = 0xD2C8
 
 # ControlDevice button values. Convention: 2 = press (down), 1 = release (up).
 # Best-effort; swap if your body behaves differently.
@@ -96,17 +97,21 @@ def open_and_connect(pid, allowed, sdk_handshake=False) -> PtpUsbDevice:
     return dev
 
 
-def read_value(dev, code):
-    rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_PROP_VALUE, params=[code])
-    return rc, data
+def read_current(dev, code):
+    """Read a property's current value from the 0x9209 stream (0x9204 returns
+    0x2005 Operation Not Supported on the A6700). Returns the int value or None."""
+    rc, data = dev.transaction(OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO, params=[0])
+    if rc != PTP_RC_OK or not data:
+        return None
+    f = current_value_in_stream(data, code)
+    return None if f is None else f["current"]
 
 
 def test_aspect_3_2(dev):
     print("\n=== test-aspect-3-2 (session-only write) ===")
-    rc, data = read_value(dev, PROP_ASPECT_RATIO)
-    print(f"[before] GetExtDevicePropValue(0xD211) -> {rc_str(rc)}")
-    if rc == PTP_RC_OK:
-        decode_prop_value(PROP_ASPECT_RATIO, data)
+    before = read_current(dev, PROP_ASPECT_RATIO)
+    print(f"[before] aspect_ratio (0xD211) current = {before} "
+          f"({'3:2' if before == 1 else '16:9' if before == 2 else '?'})")
 
     print("[write ] SetExtDevicePropValue(0xD211) <- 1 (3:2)")
     rc, _ = dev.transaction(OP_SDIO_SET_EXT_DEVICE_PROP_VALUE,
@@ -114,13 +119,19 @@ def test_aspect_3_2(dev):
     print(f"         response -> {rc_str(rc)}"
           + ("  (accepted)" if rc == PTP_RC_OK else "  (rejected/blocked)"))
 
-    time.sleep(0.2)
-    rc, data = read_value(dev, PROP_ASPECT_RATIO)
-    print(f"[after ] GetExtDevicePropValue(0xD211) -> {rc_str(rc)}")
-    if rc == PTP_RC_OK:
-        decode_prop_value(PROP_ASPECT_RATIO, data)
-    print("Interpretation: value 1 = 3:2, 2 = 16:9. If 'after' is still 2, the "
-          "body refused 3:2 in movie mode (expected per the HAITA capability gate).")
+    time.sleep(0.3)
+    after = read_current(dev, PROP_ASPECT_RATIO)
+    print(f"[after ] aspect_ratio (0xD211) current = {after} "
+          f"({'3:2' if after == 1 else '16:9' if after == 2 else '?'})")
+
+    if after == 1:
+        print("RESULT: the body ACTUALLY switched aspect_ratio to 3:2 (session). "
+              "Record a clip with --test-movie-rec and check the MP4 resolution.")
+    elif rc == PTP_RC_OK and after == before:
+        print("RESULT: 0x9205 returned OK but the value did NOT change -> the body "
+              "accepted the command then silently ignored it (capability gate).")
+    else:
+        print("RESULT: value unchanged / rejected. 3:2 movie appears blocked.")
 
 
 def test_burst_trigger(dev, drive_value):
@@ -151,6 +162,33 @@ def test_burst_trigger(dev, drive_value):
           "drive mode) should have been captured.")
 
 
+def test_movie_rec(dev, seconds=2.0):
+    print("\n=== test-movie-rec (session-only write) ===")
+    print(f"[ctrl  ] movie_rec_button (0xD2C8) START")
+    rc, _ = dev.transaction(OP_SDIO_CONTROL_DEVICE, params=[CTRL_MOVIE_REC],
+                            send_data=_u16(BTN_PRESS))
+    print(f"         press   -> {rc_str(rc)}")
+    time.sleep(0.15)
+    rc, _ = dev.transaction(OP_SDIO_CONTROL_DEVICE, params=[CTRL_MOVIE_REC],
+                            send_data=_u16(BTN_RELEASE))
+    print(f"         release -> {rc_str(rc)}")
+
+    print(f"[wait  ] recording ~{seconds:.0f}s ...")
+    time.sleep(seconds)
+
+    print(f"[ctrl  ] movie_rec_button (0xD2C8) STOP")
+    rc, _ = dev.transaction(OP_SDIO_CONTROL_DEVICE, params=[CTRL_MOVIE_REC],
+                            send_data=_u16(BTN_PRESS))
+    print(f"         press   -> {rc_str(rc)}")
+    time.sleep(0.15)
+    rc, _ = dev.transaction(OP_SDIO_CONTROL_DEVICE, params=[CTRL_MOVIE_REC],
+                            send_data=_u16(BTN_RELEASE))
+    print(f"         release -> {rc_str(rc)}")
+    print("Done. Check the SD card: inspect the recorded MP4's real resolution "
+          "(e.g. with MediaInfo/ffprobe) - after --test-aspect-3-2 this tells you "
+          "whether the body actually recorded a 3:2 'open gate' frame or stayed 16:9.")
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Controlled SESSION-ONLY experiments for the Sony A6700 "
@@ -167,6 +205,11 @@ def main():
                     help="Try to set aspect_ratio (0xD211) to 3:2 and read back.")
     ap.add_argument("--test-burst-trigger", action="store_true",
                     help="Run an S1/S2 ControlDevice trigger sequence.")
+    ap.add_argument("--test-movie-rec", action="store_true",
+                    help="Start movie recording (0xD2C8), wait, then stop - to "
+                         "check the recorded MP4 resolution on the SD card.")
+    ap.add_argument("--rec-seconds", type=float, default=2.0,
+                    help="Recording duration for --test-movie-rec (default 2s).")
     ap.add_argument("--drive-value", type=lambda x: int(x, 0), default=None,
                     help="Optional value to write into still_capture_mode (0x5013) "
                          "before --test-burst-trigger (enum value from probe [5]).")
@@ -177,9 +220,9 @@ def main():
                  "Re-run with --confirm-session-write to acknowledge, plus one of\n"
                  "--test-aspect-3-2 / --test-burst-trigger. For diagnostics only,\n"
                  "use the strictly read-only probe_a6700.py instead.")
-    if not (args.test_aspect_3_2 or args.test_burst_trigger):
-        sys.exit("[INFO] Nothing to do. Choose --test-aspect-3-2 and/or "
-                 "--test-burst-trigger.")
+    if not (args.test_aspect_3_2 or args.test_burst_trigger or args.test_movie_rec):
+        sys.exit("[INFO] Nothing to do. Choose --test-aspect-3-2, "
+                 "--test-burst-trigger and/or --test-movie-rec.")
 
     # Explicit allow-list for this session: read ops + the specific writes needed.
     allowed = set(READ_ONLY_OPS)
@@ -195,6 +238,8 @@ def main():
             test_aspect_3_2(dev)
         if args.test_burst_trigger:
             test_burst_trigger(dev, args.drive_value)
+        if args.test_movie_rec:
+            test_movie_rec(dev, seconds=args.rec_seconds)
     except PtpError as e:
         sys.exit(f"[ERROR] {e}")
     except usb.core.USBError as e:

@@ -70,8 +70,10 @@ OP_GET_DEVICE_INFO = 0x1001
 OP_SDIO_CONNECT = 0x9201
 OP_SDIO_GET_EXT_DEVICE_INFO = 0x9202
 OP_SDIO_GET_EXT_DEVICE_PROP_DESC = 0x9203
-OP_SDIO_GET_EXT_DEVICE_PROP_VALUE = 0x9204  # read-only: current value of a prop
-OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO = 0x9209  # read-only dump of all props
+OP_SDIO_GET_EXT_DEVICE_PROP_VALUE = 0x9204  # deprecated: returns 0x2005 on A6700
+OP_SDIO_GET_ALL_EXT_DEVICE_PROP = 0x9208  # read-only dump (values)
+OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO = 0x9209  # read-only dump (full descriptors)
+OP_SDIO_GET_EXT_DEVICE_PROP = 0x9251  # read-only: extended property (variant)
 
 # Session write ops (host->device DATA). NOT in the read-only whitelist.
 OP_SDIO_SET_REMOTE_SDK_INFO = 0x9214  # host SDK handshake (opt-in: --sdk-handshake)
@@ -85,8 +87,9 @@ READ_ONLY_OPS = {
     OP_SDIO_CONNECT,
     OP_SDIO_GET_EXT_DEVICE_INFO,
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC,
-    OP_SDIO_GET_EXT_DEVICE_PROP_VALUE,
+    OP_SDIO_GET_ALL_EXT_DEVICE_PROP,
     OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO,
+    OP_SDIO_GET_EXT_DEVICE_PROP,
 }
 
 OP_NAMES = {
@@ -97,7 +100,9 @@ OP_NAMES = {
     OP_SDIO_GET_EXT_DEVICE_INFO: "SDIO_GetExtDeviceInfo",
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC: "SDIO_GetExtDevicePropDesc",
     OP_SDIO_GET_EXT_DEVICE_PROP_VALUE: "SDIO_GetExtDevicePropValue",
+    OP_SDIO_GET_ALL_EXT_DEVICE_PROP: "SDIO_GetAllExtDeviceProp",
     OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO: "SDIO_GetAllExtDevicePropInfo",
+    OP_SDIO_GET_EXT_DEVICE_PROP: "SDIO_GetExtDeviceProp",
     OP_SDIO_SET_REMOTE_SDK_INFO: "SDIO_SetRemoteSdkInfo",
     OP_SDIO_SET_EXT_DEVICE_PROP_VALUE: "SDIO_SetExtDevicePropValue",
     OP_SDIO_CONTROL_DEVICE: "SDIO_ControlDevice",
@@ -485,61 +490,89 @@ def _read_dpv(data: bytes, off: int, dtype: int):
     return val, off + size
 
 
-def decode_prop_desc(code: int, data: bytes):
-    """Decode a Sony DevicePropDesc returned by GetExtDevicePropDesc (0x9203):
-    data type, GetSet access, current value and the allowed values (enum/range).
+def parse_dpd(data: bytes, off: int = 0):
+    """Parse one Sony DevicePropDesc starting at `off`. Returns a dict with the
+    fields (code, type, getset, enable, default, current, form, enum, range) and
+    the offset right after the entry, or None on mismatch.
 
-    Sony layout: code(2) type(2) GetSet(1) Enable(1) FactoryDefault(DTS)
-    CurrentValue(DTS) FormFlag(1) [form]. Defensive: on any mismatch, falls back
-    to a raw hex dump so nothing is lost.
+    Sony layout: code(2) type(2) GetSet(1) Enable(1) extra(1) FactoryDefault(DTS)
+    CurrentValue(DTS) FormFlag(1) [form]. The extra byte after the enable flag is
+    Sony-specific (verified on A6700 fw 2.00: without it still_capture_mode's
+    66-byte enum is misaligned).
     """
+    try:
+        code = struct.unpack_from("<H", data, off)[0]
+        dtype = struct.unpack_from("<H", data, off + 2)[0]
+        if dtype not in PTP_DATATYPES:
+            return None
+        getset = data[off + 4]
+        enable = data[off + 5]
+        p = off + 7  # skip the Sony extra byte at off+6
+        default, p = _read_dpv(data, p, dtype)
+        current, p = _read_dpv(data, p, dtype)
+        form = data[p]; p += 1
+        enum = None
+        rng = None
+        if form == 0x02:
+            n = struct.unpack_from("<H", data, p)[0]; p += 2
+            enum = []
+            for _ in range(n):
+                v, p = _read_dpv(data, p, dtype)
+                enum.append(v)
+        elif form == 0x01:
+            vmin, p = _read_dpv(data, p, dtype)
+            vmax, p = _read_dpv(data, p, dtype)
+            vstep, p = _read_dpv(data, p, dtype)
+            rng = (vmin, vmax, vstep)
+        return {"code": code, "type": dtype, "getset": getset, "enable": enable,
+                "default": default, "current": current, "form": form,
+                "enum": enum, "range": rng, "end": p}
+    except (struct.error, IndexError):
+        return None
+
+
+def decode_prop_desc(code: int, data: bytes):
+    """Decode and print a Sony DevicePropDesc (GetExtDevicePropDesc 0x9203, or a
+    slice of the 0x9209 stream). Falls back to a raw hex dump on mismatch."""
     label = prop_name(code)
     if not data:
         print(f"        -> 0x{code:04X} {label}: empty descriptor "
               "(property not available in the current camera mode)")
         return
-    try:
-        pcode = struct.unpack_from("<H", data, 0)[0]
-        dtype = struct.unpack_from("<H", data, 2)[0]
-        getset = data[4]
-        enable = data[5]
-        # Sony GetExtDevicePropDesc inserts one extra byte after the enable flag
-        # (before the values). Skipping it aligns FactoryDefault / CurrentValue /
-        # FormFlag / FormEnum correctly. Verified on A6700 fw 2.00: without this
-        # skip, still_capture_mode (66 bytes) and aspect_ratio (12 bytes) fall out
-        # of alignment; with it, still_capture_mode parses as a clean enum.
-        extra = data[6]
-        off = 7
-        default, off = _read_dpv(data, off, dtype)
-        current, off = _read_dpv(data, off, dtype)
-        form = data[off]; off += 1
-
-        tname = PTP_DATATYPES.get(dtype, ("0x%04X" % dtype, 0))[0]
-        gs = "Get/Set" if getset == 1 else "Get only"
-        print(f"        -> 0x{pcode:04X} {label}")
-        print(f"           type={tname}  access={gs}  enabled={enable}")
-        print(f"           CurrentValue = {current}   (factory default = {default})")
-
-        if form == 0x02:  # enumeration
-            n = struct.unpack_from("<H", data, off)[0]; off += 2
-            vals = []
-            for _ in range(n):
-                v, off = _read_dpv(data, off, dtype)
-                vals.append(v)
-            shown = ", ".join(str(v) for v in vals[:24])
-            more = " …" if len(vals) > 24 else ""
-            print(f"           FormEnum ({n} allowed): {shown}{more}")
-        elif form == 0x01:  # range
-            vmin, off = _read_dpv(data, off, dtype)
-            vmax, off = _read_dpv(data, off, dtype)
-            vstep, off = _read_dpv(data, off, dtype)
-            print(f"           FormRange: min={vmin} max={vmax} step={vstep}")
-        else:
-            print("           Form: none")
-    except (struct.error, IndexError):
-        hex_dump = data.hex()
+    f = parse_dpd(data, 0)
+    if f is None:
         print(f"        -> 0x{code:04X} {label}: could not decode "
-              f"({len(data)} bytes), raw = {hex_dump}")
+              f"({len(data)} bytes), raw = {data.hex()}")
+        return
+    tname = PTP_DATATYPES.get(f["type"], ("0x%04X" % f["type"], 0))[0]
+    gs = "Get/Set" if f["getset"] == 1 else "Get only"
+    print(f"        -> 0x{f['code']:04X} {label}")
+    print(f"           type={tname}  access={gs}  enabled={f['enable']}")
+    print(f"           CurrentValue = {f['current']}   "
+          f"(factory default = {f['default']})")
+    if f["enum"] is not None:
+        shown = ", ".join(str(v) for v in f["enum"][:24])
+        more = " …" if len(f["enum"]) > 24 else ""
+        print(f"           FormEnum ({len(f['enum'])} allowed): {shown}{more}")
+    elif f["range"] is not None:
+        print(f"           FormRange: min={f['range'][0]} max={f['range'][1]} "
+              f"step={f['range'][2]}")
+    else:
+        print("           Form: none")
+
+
+def current_value_in_stream(stream: bytes, code: int):
+    """Return the current value of `code` by locating its DevicePropDesc inside a
+    GetAllExtDevicePropInfo (0x9209) stream, or None if not found. Read-only."""
+    for i in range(0, len(stream) - 4, 2):
+        if struct.unpack_from("<H", stream, i)[0] != code:
+            continue
+        if struct.unpack_from("<H", stream, i + 2)[0] not in PTP_DATATYPES:
+            continue
+        f = parse_dpd(stream, i)
+        if f is not None and f["code"] == code:
+            return f
+    return None
 
 
 def decode_prop_value(code: int, data: bytes):
@@ -719,16 +752,29 @@ def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False,
             if rc == PTP_RC_OK:
                 decode_prop_desc(code, data)
 
-        # 5b) Exact current values via GetExtDevicePropValue (0x9204), read-only.
-        print("\n[5b] GetExtDevicePropValue (current values):")
-        for code in (0xD241, 0xD242, 0xD286, 0xD21D):
-            rc, data = dev.transaction(
-                OP_SDIO_GET_EXT_DEVICE_PROP_VALUE, params=[code]
-            )
-            print(f"    0x{code:04X} {prop_name(code):<30} "
-                  f"-> {rc_str(rc)} ({len(data)} bytes)")
-            if rc == PTP_RC_OK:
-                decode_prop_value(code, data)
+        # 5b) Real current values. GetExtDevicePropValue (0x9204) returns 0x2005
+        #     (Operation Not Supported) on the A6700 v300 dataset, so the actual
+        #     current values are read from the GetAllExtDevicePropInfo (0x9209)
+        #     stream instead. Read-only.
+        print("\n[5b] Current values (from the 0x9209 stream):")
+        if all_prop_stream:
+            for code in (0x5013, 0xD211, 0xD241, 0xD242, 0xD286):
+                f = current_value_in_stream(all_prop_stream, code)
+                if f is None:
+                    print(f"    0x{code:04X} {prop_name(code):<30} not in stream")
+                else:
+                    print(f"    0x{code:04X} {prop_name(code):<30} "
+                          f"CurrentValue = {f['current']}")
+        else:
+            print("    (no 0x9209 stream available)")
+
+        # 5c) Also probe GetExtDeviceProp (0x9251) read-only, to see whether this
+        #     variant is supported and what it returns on the A6700.
+        rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_PROP, params=[0])
+        print(f"\n[5c] SDIO_GetExtDeviceProp(0x9251) -> {rc_str(rc)} "
+              f"({len(data)} bytes)")
+        if rc == PTP_RC_OK and data:
+            decode_all_ext_prop_info(data, verbose=verbose)
 
     finally:
         # Clean session close (read-only).

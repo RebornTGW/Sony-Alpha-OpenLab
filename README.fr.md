@@ -178,11 +178,14 @@ python probe_a6700.py --sdk-handshake
 python probe_a6700.py --pid 0x0E78
 ```
 
-La sonde lit les valeurs via `GetExtDevicePropValue (0x9204)` à l'étape `[5b]`, et
-décode les entrées `aspect_ratio` / `recording_setting_movie` /
-`recording_frame_rate_setting_movie` directement depuis le flux `0x9209` en `[4c]`.
-`--sdk-handshake` est la seule exception à la lecture seule par défaut (voir la note
-ci-dessus) ; tout le reste de la sonde demeure en lecture seule.
+Sur l'A6700, `GetExtDevicePropValue (0x9204)` renvoie `0x2005` (Operation Not
+Supported) ; la sonde lit donc les **vraies valeurs courantes depuis le flux
+`GetAllExtDevicePropInfo (0x9209)`** à l'étape `[5b]` (pour `still_capture_mode`,
+`aspect_ratio`, `file_format_movie`, `recording_setting_movie`,
+`recording_frame_rate_setting_movie`), décode des entrées en `[4c]`, et teste aussi
+`GetExtDeviceProp (0x9251)` en lecture seule en `[5c]`. `--sdk-handshake` est la seule
+exception à la lecture seule par défaut (voir la note ci-dessus) ; tout le reste de la
+sonde demeure en lecture seule.
 
 Les listes de codes (opcodes vendor en `[2b]`, propriétés exposées en `[4]`/`[4b]`)
 sont **compactes par défaut** ; `--verbose` affiche la liste complète code par code.
@@ -328,12 +331,16 @@ python experiment_a6700.py --confirm-session-write --test-aspect-3-2
 
 # Déclenchement multi-vues contrôlé : réglage drive optionnel + séquence S1/S2
 python experiment_a6700.py --confirm-session-write --test-burst-trigger --drive-value 0x2
+
+# Enregistrer un court clip pour inspecter la résolution du MP4 sur la carte SD
+python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-seconds 2
 ```
 
 | Expérimentation | Ce qu'elle fait (session uniquement) |
 |---|---|
-| `--test-aspect-3-2` | `SetExtDevicePropValue(0x9205)` écrit `1` (3:2) dans `aspect_ratio` (0xD211), relit la valeur et affiche le résultat PTP (`0x2001 OK` vs erreur = bloqué par le verrou de capacité). |
+| `--test-aspect-3-2` | lit la valeur courante d'`aspect_ratio` (0xD211) depuis le flux `0x9209`, `SetExtDevicePropValue(0x9205)` écrit `1` (3:2), relit, et indique si le boîtier a réellement basculé `2`→`1` ou s'il a accepté-puis-ignoré. |
 | `--test-burst-trigger` | règle éventuellement `still_capture_mode` (0x5013) via `--drive-value`, puis exécute `ControlDevice(0x9207)` : `S1` (0xD2C1) press/release + `S2` (0xD2C2) press/release. |
+| `--test-movie-rec` | bascule `movie_rec_button` (0xD2C8) via `ControlDevice(0x9207)` pour démarrer, attend `--rec-seconds`, puis arrête — pour vérifier la résolution réelle du MP4 enregistré (ex. après `--test-aspect-3-2`). |
 
 > ⚠️ Ces écritures modifient l'**état de session en direct** (et `--test-burst-trigger`
 > **prend une photo**). Elles sont volatiles, mais à utiliser délibérément, sur votre
