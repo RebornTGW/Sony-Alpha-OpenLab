@@ -160,10 +160,28 @@ python probe_a6700.py
 # Standard PTP only (stops after GetDeviceInfo)
 python probe_a6700.py --no-sdio
 
+# Full code lists (all vendor opcodes & all exposed properties)
+python probe_a6700.py --verbose
+
 # Force a specific USB PID
 # (A6700 in PC Remote mode = 0x0E78, confirmed on firmware 2.00)
 python probe_a6700.py --pid 0x0E78
 ```
+
+Code lists (vendor opcodes in `[2b]`, exposed properties in `[4]`/`[4b]`) are
+**compact by default**; pass `--verbose` for the full per-code listing. Step `[4b]`
+runs the read-only `SDIO_GetAllExtDevicePropInfo (0x9209)` to show which video
+`0xD2xx` properties the body reports in its global stream.
+
+> ℹ️ **About video properties & `SetRemoteSdkInfo (0x9214)`.** On the A6700,
+> `file_format_movie (0xD241)` / `recording_setting_movie (0xD242)` can return an
+> empty descriptor even with the mode dial on Video/M. Static analysis of
+> `libInfraRemote.so` shows property visibility is driven by a per-property
+> `IsEnable` flag (`MrpwDeviceManager::UpdateInternalPropValueAndIsEnable`) tied to
+> camera state, and that `SetRemoteSdkInfo (0x9214)` is the handshake step that
+> registers the host SDK version/model. `0x9214` **sends data to the camera**
+> (session handshake, not a settings write), so it is deliberately **kept out of the
+> read-only whitelist**; enabling it would be a separate, explicit opt-in.
 
 > 📌 **Known A6700 PID:** `0x0E78` in **PC Remote** USB mode (confirmed live on
 > firmware **2.00**). The PID differs per USB connection mode and per body.

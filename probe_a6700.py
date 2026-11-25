@@ -70,6 +70,11 @@ OP_GET_DEVICE_INFO = 0x1001
 OP_SDIO_CONNECT = 0x9201
 OP_SDIO_GET_EXT_DEVICE_INFO = 0x9202
 OP_SDIO_GET_EXT_DEVICE_PROP_DESC = 0x9203
+OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO = 0x9209  # read-only dump of all props
+
+# Not in the whitelist: it sends data host->camera (session handshake, not a
+# settings write). Kept out of the read-only default on purpose; see README.
+OP_SDIO_SET_REMOTE_SDK_INFO = 0x9214
 
 READ_ONLY_OPS = {
     OP_OPEN_SESSION,
@@ -78,6 +83,7 @@ READ_ONLY_OPS = {
     OP_SDIO_CONNECT,
     OP_SDIO_GET_EXT_DEVICE_INFO,
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC,
+    OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO,
 }
 
 OP_NAMES = {
@@ -87,6 +93,7 @@ OP_NAMES = {
     OP_SDIO_CONNECT: "SDIO_Connect",
     OP_SDIO_GET_EXT_DEVICE_INFO: "SDIO_GetExtDeviceInfo",
     OP_SDIO_GET_EXT_DEVICE_PROP_DESC: "SDIO_GetExtDevicePropDesc",
+    OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO: "SDIO_GetAllExtDevicePropInfo",
 }
 
 PTP_RC_OK = 0x2001  # "OK" response code
@@ -364,13 +371,21 @@ def _is_prop_code(v: int) -> bool:
     return (0x5000 <= v <= 0x50FF) or (0xD100 <= v <= 0xD3FF)
 
 
-def decode_ext_device_info(data: bytes):
+def _video_codes(codes):
+    """Subset of codes that relate to video / aspect / drive (for compact view)."""
+    wanted = (0x5013, 0xD211, 0xD219, 0xD21D, 0xD241, 0xD242, 0xD286,
+              0xD29A, 0xD29B, 0x500E)
+    return [c for c in codes if c in wanted]
+
+
+def decode_ext_device_info(data: bytes, verbose: bool = False):
     """Decode SDIO_GetExtDeviceInfo (0x9202): list the DeviceProp / ControlDevice
     codes the camera exposes live.
 
     The dataset starts with a uint16 version followed by uint16-counted arrays of
     uint16 codes. We parse those arrays defensively and, as a robust cross-check,
     also scan the whole payload for known code values. Read-only decoding.
+    Compact by default; pass verbose=True for the full per-code listing.
     """
     if len(data) < 4:
         print("      (no extended device-info payload)")
@@ -414,12 +429,22 @@ def decode_ext_device_info(data: bytes):
     if arrays:
         print(f"      Parsed arrays    : {len(arrays)} "
               f"({', '.join(str(len(a)) for a in arrays)} entries)")
-    print(f"      Exposed properties ({len(props)}):")
-    for c in props:
-        print(f"        0x{c:04X}  {prop_name(c)}")
-    print(f"      Exposed control/trigger codes ({len(ctrls)}):")
-    for c in ctrls:
-        print(f"        0x{c:04X}  {prop_name(c)}")
+    print(f"      Exposed properties: {len(props)} | "
+          f"control/trigger codes: {len(ctrls)}")
+
+    if verbose:
+        print(f"      Properties ({len(props)}):")
+        for c in props:
+            print(f"        0x{c:04X}  {prop_name(c)}")
+        print(f"      Control/trigger codes ({len(ctrls)}):")
+        for c in ctrls:
+            print(f"        0x{c:04X}  {prop_name(c)}")
+    else:
+        vid = _video_codes(props)
+        if vid:
+            print("      Video/aspect/drive props present: "
+                  + ", ".join(f"0x{c:04X} {prop_name(c)}" for c in vid))
+        print("      (use --verbose for the full code list)")
 
 
 def _read_dpv(data: bytes, off: int, dtype: int):
@@ -451,7 +476,13 @@ def decode_prop_desc(code: int, data: bytes):
         dtype = struct.unpack_from("<H", data, 2)[0]
         getset = data[4]
         enable = data[5]
-        off = 6
+        # Sony GetExtDevicePropDesc inserts one extra byte after the enable flag
+        # (before the values). Skipping it aligns FactoryDefault / CurrentValue /
+        # FormFlag / FormEnum correctly. Verified on A6700 fw 2.00: without this
+        # skip, still_capture_mode (66 bytes) and aspect_ratio (12 bytes) fall out
+        # of alignment; with it, still_capture_mode parses as a clean enum.
+        extra = data[6]
+        off = 7
         default, off = _read_dpv(data, off, dtype)
         current, off = _read_dpv(data, off, dtype)
         form = data[off]; off += 1
@@ -484,6 +515,33 @@ def decode_prop_desc(code: int, data: bytes):
               f"({len(data)} bytes), raw = {hex_dump}")
 
 
+def decode_all_ext_prop_info(data: bytes, verbose: bool = False):
+    """Decode SDIO_GetAllExtDevicePropInfo (0x9209): the global stream of all
+    property descriptors the camera reports. Rather than fully parse each
+    DevicePropDesc, we scan for known code values (16-bit aligned) to report which
+    properties - especially the video 0xD2xx ones - are actually present in the
+    stream. Heuristic but robust; read-only."""
+    if len(data) < 4:
+        print("      (no all-prop payload)")
+        return
+    seen = []
+    s = set()
+    for i in range(0, len(data) - 1, 2):
+        v = struct.unpack_from("<H", data, i)[0]
+        if _is_prop_code(v) and v not in s:
+            s.add(v)
+            seen.append(v)
+    props = sorted(p for p in seen if not (0xD2C0 <= p <= 0xD3FF))
+    ctrls = sorted(p for p in seen if 0xD2C0 <= p <= 0xD3FF)
+    print(f"      Properties seen: {len(props)} | control codes: {len(ctrls)}")
+    vid = _video_codes(props)
+    print("      Video/aspect/drive props present: "
+          + (", ".join(f"0x{c:04X} {prop_name(c)}" for c in vid) if vid else "none"))
+    if verbose:
+        for c in props:
+            print(f"        0x{c:04X}  {prop_name(c)}")
+
+
 # ---------------------------------------------------------------------------
 # Diagnostic sequence
 # ---------------------------------------------------------------------------
@@ -492,7 +550,7 @@ def rc_str(rc: int) -> str:
     return "OK" if rc == PTP_RC_OK else f"0x{rc:04X}"
 
 
-def run_probe(pid: int | None, do_sdio: bool = True):
+def run_probe(pid: int | None, do_sdio: bool = True, verbose: bool = False):
     print("=== probe_a6700: READ-ONLY USB diagnostic ===\n")
     dev = PtpUsbDevice.open_first(pid=pid)
     print(f"[+] PTP device opened "
@@ -525,13 +583,17 @@ def run_probe(pid: int | None, do_sdio: bool = True):
                   f"(vendor 0x92xx: {len(vendor_ops)})")
             print(f"      Properties       : {len(props)}")
 
-            # 2b) Full list of vendor 0x92xx opcodes, cross-referenced with
-            #     the documented names (docs/PROTOCOL.en.md).
+            # 2b) Vendor 0x92xx opcodes (compact by default; full with --verbose).
             if vendor_ops:
-                print(f"\n[2b] Vendor operations 0x92xx ({len(vendor_ops)}):")
-                for o in sorted(vendor_ops):
-                    print(f"       0x{o:04X}  {VENDOR_OP_NAMES.get(o, '(unknown)')}")
-                print()
+                named = sum(1 for o in vendor_ops if o in VENDOR_OP_NAMES)
+                print(f"\n[2b] Vendor operations 0x92xx: {len(vendor_ops)} "
+                      f"({named} named)")
+                if verbose:
+                    for o in sorted(vendor_ops):
+                        print(f"       0x{o:04X}  "
+                              f"{VENDOR_OP_NAMES.get(o, '(unknown)')}")
+                else:
+                    print("     (use --verbose for the full list)")
 
         if not do_sdio:
             return
@@ -551,21 +613,32 @@ def run_probe(pid: int | None, do_sdio: bool = True):
             rc, data = dev.transaction(OP_SDIO_GET_EXT_DEVICE_INFO, params=[0x00C8])
         print(f"[4] SDIO_GetExtDeviceInfo(0x9202)-> {rc_str(rc)} ({len(data)} bytes)")
         if rc == PTP_RC_OK and data:
-            decode_ext_device_info(data)
+            decode_ext_device_info(data, verbose=verbose)
 
         # 3c) SDIO Connect phase 3 - finalize the handshake.
         rc, data = dev.transaction(OP_SDIO_CONNECT, params=[3, 0, 0])
         extra = f" ({len(data)} bytes data)" if data else ""
         print(f"[3] SDIO_Connect(0x9201) ph3     -> {rc_str(rc)}{extra}")
 
+        # 4b) GetAllExtDevicePropInfo (read-only) - global property stream, to see
+        #     which video 0xD2xx properties are actually reported by the body.
+        rc, data = dev.transaction(
+            OP_SDIO_GET_ALL_EXT_DEVICE_PROP_INFO, params=[0]
+        )
+        print(f"\n[4b] SDIO_GetAllExtDevicePropInfo(0x9209) -> {rc_str(rc)} "
+              f"({len(data)} bytes)")
+        if rc == PTP_RC_OK and data:
+            decode_all_ext_prop_info(data, verbose=verbose)
+
         # 5) GetExtDevicePropDesc - read and decode a few safe descriptors
         #    (current value + allowed values). Read-only.
         print("\n[5] GetExtDevicePropDesc (decoded):")
-        for code in (0x5013, 0xD211, 0xD241, 0xD242):
+        for code in (0x5013, 0x500E, 0xD211, 0xD219, 0xD21D,
+                     0xD241, 0xD242, 0xD286):
             rc, data = dev.transaction(
                 OP_SDIO_GET_EXT_DEVICE_PROP_DESC, params=[code]
             )
-            print(f"    0x{code:04X} {prop_name(code):<26} "
+            print(f"    0x{code:04X} {prop_name(code):<30} "
                   f"-> {rc_str(rc)} ({len(data)} bytes)")
             if rc == PTP_RC_OK:
                 decode_prop_desc(code, data)
@@ -585,13 +658,15 @@ def main():
         description="Read-only USB diagnostic probe for the Sony A6700."
     )
     ap.add_argument("--pid", type=lambda x: int(x, 0), default=None,
-                    help="Explicit USB PID (e.g. 0x0DE7). Default: auto.")
+                    help="Explicit USB PID (e.g. 0x0E78). Default: auto.")
     ap.add_argument("--no-sdio", action="store_true",
                     help="Stop after GetDeviceInfo (standard PTP only).")
+    ap.add_argument("--verbose", "-v", action="store_true",
+                    help="Print the full code lists (opcodes & properties).")
     args = ap.parse_args()
 
     try:
-        run_probe(pid=args.pid, do_sdio=not args.no_sdio)
+        run_probe(pid=args.pid, do_sdio=not args.no_sdio, verbose=args.verbose)
     except PtpError as e:
         sys.exit(f"[ERROR] {e}")
     except usb.core.USBError as e:

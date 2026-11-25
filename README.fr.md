@@ -167,10 +167,29 @@ python probe_a6700.py
 # PTP standard uniquement (s'arrête après GetDeviceInfo)
 python probe_a6700.py --no-sdio
 
+# Listes de codes complètes (tous les opcodes vendor & toutes les propriétés)
+python probe_a6700.py --verbose
+
 # Forcer un PID USB précis
 # (A6700 en mode PC Remote = 0x0E78, confirmé sur firmware 2.00)
 python probe_a6700.py --pid 0x0E78
 ```
+
+Les listes de codes (opcodes vendor en `[2b]`, propriétés exposées en `[4]`/`[4b]`)
+sont **compactes par défaut** ; `--verbose` affiche la liste complète code par code.
+L'étape `[4b]` exécute `SDIO_GetAllExtDevicePropInfo (0x9209)` (lecture seule) pour
+montrer quelles propriétés vidéo `0xD2xx` le boîtier remonte dans son flux global.
+
+> ℹ️ **À propos des propriétés vidéo & de `SetRemoteSdkInfo (0x9214)`.** Sur l'A6700,
+> `file_format_movie (0xD241)` / `recording_setting_movie (0xD242)` peuvent renvoyer
+> un descripteur vide même avec le sélecteur sur Vidéo/M. L'analyse statique de
+> `libInfraRemote.so` montre que la visibilité d'une propriété dépend d'un flag
+> `IsEnable` par propriété (`MrpwDeviceManager::UpdateInternalPropValueAndIsEnable`)
+> lié à l'état du boîtier, et que `SetRemoteSdkInfo (0x9214)` est l'étape de
+> handshake qui déclare la version/modèle du SDK hôte. `0x9214` **envoie des données
+> au boîtier** (handshake de session, pas une écriture de réglage) ; il est donc
+> volontairement **exclu de la liste blanche lecture seule** — l'activer serait une
+> option explicite séparée.
 
 > 📌 **PID A6700 connu :** `0x0E78` en mode USB **PC Remote** (confirmé en direct sur
 > firmware **2.00**). Le PID diffère selon le mode de connexion USB et le boîtier.
