@@ -2,37 +2,86 @@
 
 **🌍 Langue : [English](README.md) · Français**
 
-Outils de **diagnostic en lecture seule** pour le dialogue USB (PTP / Sony « SDIO »)
-avec un boîtier **Sony A6700 (ILCE-6700)**.
+Une **boîte à outils open-source pour les boîtiers Sony Alpha**, développée et testée
+en priorité sur le **Sony A6700 (ILCE-6700)**, avec une architecture pensée pour
+s'étendre progressivement aux autres boîtiers Sony.
 
-Ce dépôt sert à explorer le protocole de contrôle à distance de façon **sûre et
-non destructive** : ouverture de session, lecture des informations device et des
-descripteurs de propriétés étendues. Aucune commande d'écriture, de réglage ou de
+Aujourd'hui, la boîte à outils fournit un **diagnostic en lecture seule** du dialogue
+USB (PTP / Sony « SDIO ») : ouverture de session, lecture des informations device et
+des descripteurs de propriétés étendues. Aucune commande d'écriture, de réglage ou de
 déclenchement n'est émise.
 
 > ⚠️ **Projet indépendant et non officiel.** Non affilié à Sony. Utilisation à vos
 > risques, à des fins d'interopérabilité et d'étude personnelle.
+>
+> 🚧 **Développement actif.** Ce projet est en développement actif et mis à jour
+> régulièrement — attendez-vous à des changements fréquents tant que l'architecture
+> se stabilise.
 
 ---
 
 ## 🎯 Périmètre du projet
 
-Ce projet a un périmètre **strictement limité à deux objectifs de recherche**, et
-**sans aucune modification permanente** du boîtier :
+La recherche est **strictement limitée à deux objectifs**, et **sans aucune
+modification permanente** du boîtier :
 
 1. **Open Gate 3:2** — étude de la faisabilité d'un enregistrement vidéo au format
    capteur 3:2 (« open gate »).
 2. **Multi-exposition** — étude des mécanismes de capture multi-trames.
 
 Ces deux objectifs sont abordés par **analyse statique** et par **diagnostic USB en
-lecture seule**. Ce dépôt **n'a pas vocation** à fournir un outil de contrôle
-général, de déclenchement, ni de modification persistante des réglages ou du
-firmware du boîtier. Toute fonctionnalité future reste bornée à ces deux buts et au
-principe « aucune écriture permanente ».
+lecture seule**. Ce n'est pas un outil de contrôle général, de déclenchement, ni de
+modification du firmware. Toute fonctionnalité future reste bornée à ces deux buts et
+à l'approche de sécurité ci-dessous.
 
 ---
 
-## 🔒 Périmètre de sécurité
+## 📷 Boîtiers pris en charge & feuille de route
+
+La boîte à outils s'appuie sur le protocole distant Sony Alpha (PTP + extension
+vendor Sony « SDIO »), largement partagé dans la gamme. Le support est déployé par
+génération de processeur :
+
+| Génération | Boîtiers | Support prévu |
+|---|---|---|
+| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30** | **Direct / prioritaire** — cible de développement principale |
+| **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (après validation APS-C) |
+| **BIONZ X** (APS-C) | A6600, A6400 | Support ultérieur (dialecte de protocole plus ancien) |
+| Autres APS-C | ZV-E10 II | Prévu |
+
+Priorité de développement :
+
+1. **Sony A6700** — boîtier de référence (développé et testé ici en premier).
+2. Autres boîtiers **BIONZ XR APS-C** (FX30) — compatibilité directe attendue.
+3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
+4. Boîtiers **BIONZ X** (A6400, A6600) — traités ensuite, leur génération de
+   protocole étant différente.
+
+> ✅ = activement testé · autres = prévus. La compatibilité est validée boîtier par
+> boîtier ; la présence d'un code dans le protocole ne signifie pas qu'il est exposé
+> sur tous les modèles. Vous voulez votre boîtier pris en charge ? Voir
+> [Communauté & idées](#-communauté--idées).
+
+---
+
+## 🧪 Approche sécurisée — RAM d'abord
+
+Par mesure de sécurité, les fonctionnalités sont d'abord développées et testées
+**uniquement en mémoire vive (RAM-only)** via USB :
+
+- les changements vivent dans la RAM du boîtier et sont **effacés au redémarrage / au
+  retrait de la batterie** ;
+- **rien n'est écrit en mémoire persistante ni dans le firmware** ;
+- un **mode permanent ne serait envisagé que plus tard**, si et seulement si la
+  sécurité et la stabilité sont **totalement prouvées** — et même alors, de manière
+  explicite et optionnelle.
+
+L'outil de référence actuel (`probe_a6700.py`) va plus loin : il est strictement
+**en lecture seule** et n'effectue aucune écriture, même en RAM.
+
+---
+
+## 🔒 Périmètre de sécurité (sonde lecture seule)
 
 `probe_a6700.py` est **strictement en lecture seule** :
 
@@ -214,6 +263,23 @@ déclenchés** par cet outil.
 
 ---
 
+## 💬 Communauté & idées
+
+Les idées de fonctionnalités ou de boîtiers à prendre en charge sont les bienvenues :
+
+- **💡 Demandes de fonctionnalités & de boîtiers** — ouvrez une
+  [GitHub Issue](../../issues) ou lancez une
+  [GitHub Discussion](../../discussions). Indiquez votre boîtier, la version de
+  firmware et ce que vous aimeriez voir (ex. « ajouter le support A7 IV »,
+  « tester l'Open Gate sur FX30 »).
+- **🗨️ Discord communautaire** — *bientôt disponible.* Un serveur communautaire est
+  prévu pour coordonner les tests et partager les résultats.
+  `🔗 Invitation Discord : à venir` *(emplacement réservé — le lien sera ajouté ici)*
+
+Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull request.
+
+---
+
 ## 📚 Documentation
 
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (FR) / [`docs/PROTOCOL.en.md`](docs/PROTOCOL.en.md) (EN)
@@ -221,7 +287,7 @@ déclenchés** par cet outil.
 - [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) (FR) /
   [`docs/DEVICE_PROPERTIES.en.md`](docs/DEVICE_PROPERTIES.en.md) (EN)
   — table complète des **386 codes** `DevicePropCode` / contrôle.
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) (EN) / [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) (FR)
+- [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) (FR) / [`CONTRIBUTING.md`](CONTRIBUTING.md) (EN)
   — règles de contribution.
 
 ## 📁 Contenu du dépôt

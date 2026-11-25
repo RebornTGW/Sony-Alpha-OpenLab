@@ -2,36 +2,81 @@
 
 **🌍 Language: English · [Français](README.fr.md)**
 
-**Read-only diagnostic** tools for the USB dialogue (PTP / Sony "SDIO") with a
-**Sony A6700 (ILCE-6700)** body.
+An **open-source toolkit for Sony Alpha cameras**, developed and tested first on the
+**Sony A6700 (ILCE-6700)**, with an architecture designed to extend to other Sony
+bodies over time.
 
-This repository exists to explore the camera's remote-control protocol in a **safe,
-non-destructive** way: open a session, read device information and extended property
-descriptors. No write, setting, or trigger command is ever issued.
+Today the toolkit provides **read-only diagnostics** for the USB dialogue
+(PTP / Sony "SDIO"): open a session, read device information and extended property
+descriptors. No write, setting, or trigger command is issued.
 
 > ⚠️ **Independent, unofficial project.** Not affiliated with Sony. Use at your own
 > risk, for interoperability and personal study only.
+>
+> 🚧 **Active development.** This project is actively developed and updated
+> regularly — expect frequent changes while the architecture matures.
 
 ---
 
 ## 🎯 Project scope
 
-This project has a **scope strictly limited to two research goals**, and performs
-**no permanent modification** of the camera:
+The research is **strictly limited to two goals**, with **no permanent modification**
+of the camera:
 
 1. **Open Gate 3:2** — investigating the feasibility of recording video in the full
    3:2 sensor aspect ratio ("open gate").
 2. **Multi-exposure** — investigating multi-frame capture mechanisms.
 
 Both goals are approached through **static analysis** and **read-only USB
-diagnostics**. This repository is **not** intended to provide a general control tool,
-a shutter/record trigger, or any persistent modification of the camera's settings or
-firmware. Any future feature stays bounded to these two goals and to the
-"no permanent writes" principle.
+diagnostics**. This is not a general-purpose control tool, a shutter/record trigger,
+or a firmware modifier. Any future feature stays bounded to these two goals and to
+the safety approach below.
 
 ---
 
-## 🔒 Safety scope
+## 📷 Supported cameras & roadmap
+
+The toolkit is built on the Sony Alpha remote protocol (PTP + Sony "SDIO" vendor
+extension), which is largely shared across the line. Support is rolled out by
+processor generation:
+
+| Generation | Bodies | Planned support |
+|---|---|---|
+| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30** | **Direct / priority** — primary development target |
+| **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (after APS-C validation) |
+| **BIONZ X** (APS-C) | A6600, A6400 | Later support (older protocol dialect) |
+| Other APS-C | ZV-E10 II | Planned |
+
+Development priority:
+
+1. **Sony A6700** — reference body (developed and tested here first).
+2. Other **BIONZ XR APS-C** bodies (FX30) — expected to be the closest match.
+3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
+4. **BIONZ X** bodies (A6400, A6600) — handled afterward, as their protocol
+   generation differs.
+
+> ✅ = actively tested · others = planned. Compatibility is validated per body;
+> a code being present in the protocol does not mean it is exposed on every model.
+> Want your body supported? See [Community & ideas](#-community--ideas).
+
+---
+
+## 🧪 Safety approach — RAM-only first
+
+As a safety measure, features are first developed and tested **in volatile memory
+only (RAM-only)** over USB:
+
+- changes live in the camera's RAM and are **erased on reboot / battery removal**;
+- **nothing is written to persistent storage or firmware**;
+- a **permanent mode would only ever be considered later**, if and only if safety
+  and stability are **fully proven** — and even then as an explicit, opt-in step.
+
+The current reference tool (`probe_a6700.py`) goes one step further: it is strictly
+**read-only** and issues no RAM write at all.
+
+---
+
+## 🔒 Safety scope (read-only probe)
 
 `probe_a6700.py` is **strictly read-only**:
 
@@ -206,6 +251,22 @@ embedded). Only **read** codes are issued by `probe_a6700.py`; the `ControlDevic
 | "no usable PTP interface" | Wrong USB mode (Mass Storage/MTP) → switch to PC Remote / PTP. |
 | `NoBackendError` | `libusb-1.0.dll` not found → install WinUSB (Zadig) or drop the DLL. |
 | Timeout after OpenSession | Another app (Imaging Edge, gphoto2) holds the body → close it. |
+
+---
+
+## 💬 Community & ideas
+
+Ideas for features or for cameras to support are very welcome:
+
+- **💡 Feature & camera requests** — open a
+  [GitHub Issue](../../issues) or start a
+  [GitHub Discussion](../../discussions). Tell us your body, firmware version and
+  what you'd like to see (e.g. "add A7 IV support", "test Open Gate on FX30").
+- **🗨️ Community Discord** — *coming soon.* A community server is planned to
+  coordinate testing and share results.
+  `🔗 Discord invite: TBA` *(placeholder — link will be added here)*
+
+Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ---
 
