@@ -1,0 +1,49 @@
+# ==========================================================================
+# A6700-Remote-Tools — .gitignore STRICT
+# Ce dépôt ne doit JAMAIS contenir de fichiers extraits du firmware Sony.
+# Les binaires propriétaires (firmware, bibliothèques, images) sont exclus.
+# ==========================================================================
+
+# --- Binaires / firmware propriétaires (interdits dans ce dépôt) ---
+*.DAT
+*.dat
+*.so
+*.so.*
+*.bin
+*.elf
+*.ko
+*.img
+*.tar
+*.unpacked
+*.str.txt
+
+# --- Dumps / extractions éventuelles ---
+extracted*/
+firmware*/
+dumps/
+*.dump
+*.hex
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# --- Environnements virtuels & secrets ---
+.env
+.env.*
+venv/
+.venv/
+env/
+
+# --- OS / éditeurs ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
