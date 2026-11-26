@@ -2,6 +2,10 @@
 
 **🌍 Language: English · [Français](README.fr.md)**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#)
+[![Discord](https://img.shields.io/badge/Discord-Sony%20Alpha%20OpenLab-5865F2?logo=discord&logoColor=white)](https://discord.gg/Zr72h6AFa5)
+
 An **open-source toolkit for Sony Alpha cameras**, developed and tested first on the
 **Sony A6700 (ILCE-6700)**, with an architecture designed to extend to other Sony
 bodies over time.
@@ -499,9 +503,8 @@ Ideas for features or for cameras to support are very welcome:
   [GitHub Issue](../../issues) or start a
   [GitHub Discussion](../../discussions). Tell us your body, firmware version and
   what you'd like to see (e.g. "add A7 IV support", "test Open Gate on FX30").
-- **🗨️ Community Discord** — *coming soon.* A community server is planned to
-  coordinate testing and share results.
-  `🔗 Discord invite: TBA` *(placeholder — link will be added here)*
+- **🗨️ Community Discord** — join **Sony Alpha OpenLab** to coordinate testing and
+  share results: **https://discord.gg/Zr72h6AFa5**
 
 Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
@@ -547,7 +550,7 @@ A6700-Remote-Tools/
 
 - **Before / after:** _(screenshots coming soon)_
 - **Sample files:** _(Google Drive link — TBA)_
-- **Community Discord:** _(badge / invite — TBA)_
+- **Community Discord:** [Sony Alpha OpenLab](https://discord.gg/Zr72h6AFa5)
 
 ---
 

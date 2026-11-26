@@ -1,0 +1,65 @@
+name: Discord release announcement
+
+# Posts a formatted release card to the Sony Alpha OpenLab Discord whenever a
+# GitHub Release is published. Requires the repository secret
+# DISCORD_ANNOUNCEMENTS_WEBHOOK (Settings -> Secrets and variables -> Actions).
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    if: ${{ github.event.release.draft == false }}
+    steps:
+      - name: Post release card to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_ANNOUNCEMENTS_WEBHOOK }}
+          REL_NAME: ${{ github.event.release.name }}
+          REL_TAG: ${{ github.event.release.tag_name }}
+          REL_URL: ${{ github.event.release.html_url }}
+          REL_BODY: ${{ github.event.release.body }}
+          REL_AUTHOR: ${{ github.event.release.author.login }}
+          REPO: ${{ github.repository }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "DISCORD_ANNOUNCEMENTS_WEBHOOK secret is not set; skipping."
+            exit 0
+          fi
+
+          # Discord embed description limit is 4096 chars; trim the body.
+          DESC=$(printf '%s' "$REL_BODY" | head -c 3500)
+          [ -z "$DESC" ] && DESC="A new release is available."
+
+          TITLE="${REL_NAME:-$REL_TAG}"
+
+          # Build the JSON payload safely with jq (handles quoting/newlines).
+          PAYLOAD=$(jq -n \
+            --arg title "🎉 $REPO — $TITLE" \
+            --arg url "$REL_URL" \
+            --arg desc "$DESC" \
+            --arg tag "$REL_TAG" \
+            --arg author "$REL_AUTHOR" \
+            '{
+              username: "Sony Alpha OpenLab",
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 5793266,
+                fields: [
+                  { name: "Tag", value: $tag, inline: true },
+                  { name: "Released by", value: $author, inline: true }
+                ],
+                footer: { text: "A6700-Remote-Tools" }
+              }]
+            }')
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK"

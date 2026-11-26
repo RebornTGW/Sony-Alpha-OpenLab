@@ -2,6 +2,10 @@
 
 **🌍 Langue : [English](README.md) · Français**
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#)
+[![Discord](https://img.shields.io/badge/Discord-Sony%20Alpha%20OpenLab-5865F2?logo=discord&logoColor=white)](https://discord.gg/Zr72h6AFa5)
+
 Une **boîte à outils open-source pour les boîtiers Sony Alpha**, développée et testée
 en priorité sur le **Sony A6700 (ILCE-6700)**, avec une architecture pensée pour
 s'étendre progressivement aux autres boîtiers Sony.
@@ -516,9 +520,8 @@ Les idées de fonctionnalités ou de boîtiers à prendre en charge sont les bie
   [GitHub Discussion](../../discussions). Indiquez votre boîtier, la version de
   firmware et ce que vous aimeriez voir (ex. « ajouter le support A7 IV »,
   « tester l'Open Gate sur FX30 »).
-- **🗨️ Discord communautaire** — *bientôt disponible.* Un serveur communautaire est
-  prévu pour coordonner les tests et partager les résultats.
-  `🔗 Invitation Discord : à venir` *(emplacement réservé — le lien sera ajouté ici)*
+- **🗨️ Discord communautaire** — rejoignez **Sony Alpha OpenLab** pour coordonner les
+  tests et partager les résultats : **https://discord.gg/Zr72h6AFa5**
 
 Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull request.
 
@@ -563,7 +566,7 @@ A6700-Remote-Tools/
 
 - **Avant / après :** _(captures à venir)_
 - **Fichiers d'exemple :** _(lien Google Drive — à venir)_
-- **Discord communautaire :** _(badge / invitation — à venir)_
+- **Discord communautaire :** [Sony Alpha OpenLab](https://discord.gg/Zr72h6AFa5)
 
 ---
 

@@ -11,3 +11,5 @@ python probe_a6700.py             # read-only diagnostic (auto-detect)
 
 Original data only (MIT). No firmware content. Values marked `null` are to be
 confirmed on hardware.
+
+💬 Community: **Sony Alpha OpenLab** — https://discord.gg/Zr72h6AFa5
