@@ -552,7 +552,7 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 ## 📁 Repository layout
 
 ```
-A6700-Remote-Tools/
+Sony-Alpha-OpenLab/
 ├── cameras/             # per-body profiles (a6700, fx30, zve10m2) + cameras.py loader
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)

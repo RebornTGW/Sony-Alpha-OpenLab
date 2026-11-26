@@ -55,7 +55,7 @@ jobs:
                   { name: "Tag", value: $tag, inline: true },
                   { name: "Released by", value: $author, inline: true }
                 ],
-                footer: { text: "A6700-Remote-Tools" }
+                footer: { text: "Sony-Alpha-OpenLab" }
               }]
             }')
 

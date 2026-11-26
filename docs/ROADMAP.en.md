@@ -1,4 +1,4 @@
-# Roadmap — A6700-Remote-Tools
+# Roadmap — Sony-Alpha-OpenLab
 
 **🌍 Language: English · [Français](ROADMAP.md)**
 

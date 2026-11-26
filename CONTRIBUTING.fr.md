@@ -1,4 +1,4 @@
-# Guide de contribution — A6700-Remote-Tools
+# Guide de contribution — Sony-Alpha-OpenLab
 
 **🌍 Langue : [English](CONTRIBUTING.md) · Français**
 

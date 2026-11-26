@@ -1,4 +1,4 @@
-# Contributing — A6700-Remote-Tools
+# Contributing — Sony-Alpha-OpenLab
 
 **🌍 Language: English · [Français](CONTRIBUTING.fr.md)**
 

@@ -1,6 +1,6 @@
 # Sony ZV-E10 II — profile
 
-Sony APS-C (BIONZ XR) body profile for A6700-Remote-Tools. See `profile.json`
+Sony APS-C (BIONZ XR) body profile for Sony-Alpha-OpenLab. See `profile.json`
 for USB VID/PID, interface class and capture handles.
 
 Use from the repo root:
