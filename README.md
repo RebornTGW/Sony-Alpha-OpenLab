@@ -10,9 +10,14 @@ An **open-source toolkit for Sony Alpha cameras**, developed and tested first on
 **Sony A6700 (ILCE-6700)**, with an architecture designed to extend to other Sony
 bodies over time.
 
-Today the toolkit provides **read-only diagnostics** for the USB dialogue
-(PTP / Sony "SDIO"): open a session, read device information and extended property
-descriptors. No write, setting, or trigger command is issued.
+The toolkit combines three layers, each with its own safety level:
+
+- **Read-only USB probe** (PTP / Sony "SDIO") — open a session, read device info and
+  extended property descriptors; issues no write, setting, or trigger command.
+- **Opt-in session Multi-Exposure** — guarded capture + local frame stacking;
+  session-only, nothing is persisted on the camera.
+- **Volatile RAM-only Open Gate research** — read-only by default; any write is
+  in-RAM, opt-in, and gone at power-off / battery pull.
 
 > ⚠️ **Independent, unofficial project.** Not affiliated with Sony. Use at your own
 > risk, for interoperability and personal study only.
@@ -40,6 +45,19 @@ Proven **live on real hardware** (firmware 2.00, PC Remote `PID 0x0E78`):
 
 ---
 
+## 🚀 Quickstart (4 steps)
+
+1. **Install** — Python 3.9+, then `pip install -r requirements.txt`
+   (see [Installation](#-installation-windows)).
+2. **Driver** — set the camera to **PC Remote** USB mode and bind **WinUSB** to its
+   interface with **Zadig**. [How →](#2-winusb-driver-via-zadig)
+3. **Probe (read-only)** — `python probe_a6700.py` to confirm the USB handshake and
+   list the exposed properties.
+4. **Multi-exposure (opt-in)** — `python multi_exposure.py --shots 2 --live-overlay`
+   to capture and blend frames (session-only).
+
+---
+
 ## 🎯 Project scope
 
 The research is **strictly limited to two goals**, with **no permanent modification**
@@ -64,15 +82,14 @@ processor generation:
 
 | Generation | Bodies | Planned support |
 |---|---|---|
-| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30** | **Direct / priority** — primary development target |
+| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30**, **ZV-E10 II** | **Direct / priority** — primary development target |
 | **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (after APS-C validation) |
 | **BIONZ X** (APS-C) | A6600, A6400 | Later support (older protocol dialect) |
-| Other APS-C | ZV-E10 II | Planned |
 
 Development priority:
 
 1. **Sony A6700** — reference body (developed and tested here first).
-2. Other **BIONZ XR APS-C** bodies (FX30) — expected to be the closest match.
+2. Other **BIONZ XR APS-C** bodies (FX30, ZV-E10 II) — expected to be the closest match.
 3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
 4. **BIONZ X** bodies (A6400, A6600) — handled afterward, as their protocol
    generation differs.
@@ -158,6 +175,12 @@ which prevents pyusb from accessing it. Zadig lets you switch that interface to
    (e.g. "ILCE-6700" / "Sony …"; the PTP/Still Image interface).
 6. To the right of the arrow, pick **WinUSB** as the target driver.
 7. Click **Replace Driver** (or **Install Driver**) and confirm.
+
+> ⚠️ **One WinUSB bind per USB mode.** The camera exposes a **different USB PID per
+> mode** — **PC Remote `0x0E78`** vs **Mass Storage `0x0E76`** (used by
+> `ram_opengate.py`). Windows treats each PID as a separate device, so you must
+> re-run Zadig and bind **WinUSB** again after switching modes. To revert a binding:
+> *Device Manager → the interface → Uninstall device* → unplug/replug.
 
 > 💡 **Reversible.** To make Windows recognize the camera as a normal device again:
 > *Device Manager → the interface → Uninstall device*, then unplug/replug (Windows
@@ -542,7 +565,9 @@ A6700-Remote-Tools/
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # contribution guide (EN / FR)
 ├── docs/
 │   ├── PROTOCOL.en.md / PROTOCOL.md              # protocol architecture (EN / FR)
-│   └── DEVICE_PROPERTIES.en.md / .md             # 386-code table (EN / FR)
+│   ├── DEVICE_PROPERTIES.en.md / .md             # 386-code table (EN / FR)
+│   ├── RESULTS.en.md / RESULTS.md                # live experimental results (EN / FR)
+│   └── ROADMAP.en.md / ROADMAP.md                # milestones & next steps (EN / FR)
 └── README.md / README.fr.md                      # this file (EN / FR)
 ```
 

@@ -340,7 +340,17 @@ def stack_images(paths, out_path, mode="average"):
 
 def fetch_liveview(dev):
     """Read one Live View frame from the Sony live-view handle (0xFFFFC002) and
-    return it as a PIL RGB image, or None. Read-only GetObject."""
+    return it as a PIL RGB image, or None. Read-only.
+
+    BIONZ XR: like the PC-save handle, the body prepares/sizes the live-view
+    object only once GetObjectInfo(0x1008) is queried, so query it first and
+    skip the frame until ObjectCompressedSize > 0 (matches fetch_pc_save_object)."""
+    try:
+        rc_i, info = dev.transaction(OP_GET_OBJECT_INFO, params=[SONY_LIVEVIEW_HANDLE])
+    except PtpError:
+        return None
+    if rc_i != PTP_RC_OK or not info or parse_objectinfo(info)["size"] <= 0:
+        return None
     try:
         rc, data = dev.transaction(OP_GET_OBJECT, params=[SONY_LIVEVIEW_HANDLE])
     except PtpError:
@@ -470,6 +480,9 @@ def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend):
     root.bind("<space>", do_capture)
     root.bind("<Escape>", lambda e: root.destroy())
     root.bind("q", lambda e: root.destroy())
+    # Closing the window (title-bar X) should quit cleanly, not raise on the
+    # pending root.after() callback.
+    root.protocol("WM_DELETE_WINDOW", root.destroy)
     root.after(200, refresh)
     root.mainloop()
 

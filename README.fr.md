@@ -10,10 +10,15 @@ Une **boîte à outils open-source pour les boîtiers Sony Alpha**, développée
 en priorité sur le **Sony A6700 (ILCE-6700)**, avec une architecture pensée pour
 s'étendre progressivement aux autres boîtiers Sony.
 
-Aujourd'hui, la boîte à outils fournit un **diagnostic en lecture seule** du dialogue
-USB (PTP / Sony « SDIO ») : ouverture de session, lecture des informations device et
-des descripteurs de propriétés étendues. Aucune commande d'écriture, de réglage ou de
-déclenchement n'est émise.
+La boîte à outils combine trois couches, chacune avec son propre niveau de sécurité :
+
+- **Sonde USB en lecture seule** (PTP / Sony « SDIO ») — ouverture de session, lecture
+  des informations device et des descripteurs de propriétés étendues ; aucune commande
+  d'écriture, de réglage ou de déclenchement.
+- **Multi-exposition de session (opt-in)** — capture encadrée + empilement local des
+  trames ; session uniquement, rien n'est écrit de façon permanente sur le boîtier.
+- **Recherche Open Gate RAM volatile** — lecture seule par défaut ; toute écriture est
+  en RAM, opt-in, et effacée au redémarrage / retrait de batterie.
 
 > ⚠️ **Projet indépendant et non officiel.** Non affilié à Sony. Utilisation à vos
 > risques, à des fins d'interopérabilité et d'étude personnelle.
@@ -42,6 +47,19 @@ Prouvé **en direct sur boîtier réel** (firmware 2.00, PC Remote `PID 0x0E78`)
 
 ---
 
+## 🚀 Démarrage rapide (4 étapes)
+
+1. **Installer** — Python 3.9+, puis `pip install -r requirements.txt`
+   (voir [Installation](#-installation-windows)).
+2. **Pilote** — mettre le boîtier en mode USB **PC Remote** et lier **WinUSB** à son
+   interface avec **Zadig**. [Comment →](#2-pilote-winusb-via-zadig)
+3. **Sonder (lecture seule)** — `python probe_a6700.py` pour valider le handshake USB
+   et lister les propriétés exposées.
+4. **Multi-exposition (opt-in)** — `python multi_exposure.py --shots 2 --live-overlay`
+   pour capturer et fusionner les trames (session uniquement).
+
+---
+
 ## 🎯 Périmètre du projet
 
 La recherche est **strictement limitée à deux objectifs**, et **sans aucune
@@ -66,15 +84,14 @@ génération de processeur :
 
 | Génération | Boîtiers | Support prévu |
 |---|---|---|
-| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30** | **Direct / prioritaire** — cible de développement principale |
+| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30**, **ZV-E10 II** | **Direct / prioritaire** — cible de développement principale |
 | **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (après validation APS-C) |
 | **BIONZ X** (APS-C) | A6600, A6400 | Support ultérieur (dialecte de protocole plus ancien) |
-| Autres APS-C | ZV-E10 II | Prévu |
 
 Priorité de développement :
 
 1. **Sony A6700** — boîtier de référence (développé et testé ici en premier).
-2. Autres boîtiers **BIONZ XR APS-C** (FX30) — compatibilité directe attendue.
+2. Autres boîtiers **BIONZ XR APS-C** (FX30, ZV-E10 II) — compatibilité directe attendue.
 3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
 4. Boîtiers **BIONZ X** (A6400, A6600) — traités ensuite, leur génération de
    protocole étant différente.
@@ -165,6 +182,13 @@ interface sur **WinUSB**.
    (p. ex. « ILCE-6700 » / « Sony … » ; interface PTP/Still Image).
 6. À droite de la flèche, choisissez le pilote cible **WinUSB**.
 7. Cliquez sur **Replace Driver** (ou **Install Driver**) et confirmez.
+
+> ⚠️ **Un pilote WinUSB par mode USB.** Le boîtier expose un **PID USB différent selon
+> le mode** — **PC Remote `0x0E78`** vs **Mass Storage `0x0E76`** (utilisé par
+> `ram_opengate.py`). Windows traite chaque PID comme un périphérique distinct : il
+> faut donc relancer Zadig et lier **WinUSB** à nouveau après avoir changé de mode.
+> Pour annuler une liaison : *Gestionnaire de périphériques → l'interface →
+> Désinstaller le périphérique* → débrancher/rebrancher.
 
 > 💡 **Réversible.** Pour rendre le boîtier de nouveau reconnu comme appareil photo
 > normal par Windows : *Gestionnaire de périphériques → l'interface → Désinstaller
@@ -558,7 +582,9 @@ A6700-Remote-Tools/
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # guide de contribution (EN / FR)
 ├── docs/
 │   ├── PROTOCOL.md / PROTOCOL.en.md              # architecture protocole (FR / EN)
-│   └── DEVICE_PROPERTIES.md / .en.md             # table des 386 codes (FR / EN)
+│   ├── DEVICE_PROPERTIES.md / .en.md             # table des 386 codes (FR / EN)
+│   ├── RESULTS.md / RESULTS.en.md                # résultats expérimentaux en direct (FR / EN)
+│   └── ROADMAP.md / ROADMAP.en.md                # jalons & prochaines étapes (FR / EN)
 └── README.md / README.fr.md                      # ce fichier (EN / FR)
 ```
 

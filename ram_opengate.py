@@ -44,8 +44,11 @@ OPENGATE_HEIGHT = 0x0A00
 # --- Sony vendor memory CDBs (CONFIRM ON HARDWARE from the open updater proto) ---
 # Not shipped with working opcodes on purpose: fill these from the open-source
 # transport before use. Left None so the tool refuses rather than guesses.
-VENDOR_MEM_READ_CDB = None        # e.g. bytes([0xC0, ...]) + addr + length
-VENDOR_MEM_WRITE_CDB = None
+# Each is a callable that builds the raw SCSI CDB from an address + length, e.g.
+#   VENDOR_MEM_READ_CDB  = lambda addr, length: bytes([0xC0]) + struct.pack(">II", addr, length)
+#   VENDOR_MEM_WRITE_CDB = lambda addr, length: bytes([0xC1]) + struct.pack(">II", addr, length)
+VENDOR_MEM_READ_CDB = None        # lambda addr, length: <cdb bytes>
+VENDOR_MEM_WRITE_CDB = None       # lambda addr, length: <cdb bytes>
 
 
 class MscError(RuntimeError):
@@ -138,12 +141,13 @@ def find_libmpr_height_site(dev):
 
 def main():
     ap = argparse.ArgumentParser(description="Volatile RAM Open Gate helper (A6700).")
-    ap.add_argument("--verify-only", action="store_true", default=True,
-                    help="(default) read-only: verify stock bytes, write nothing.")
-    ap.add_argument("--confirm-ram-write", action="store_true",
-                    help="opt-in: apply the volatile RAM patch (gone at power-off).")
-    ap.add_argument("--restore", action="store_true",
-                    help="write the stock/backed-up bytes back (no reboot).")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--verify-only", action="store_true", default=True,
+                      help="(default) read-only: verify stock bytes, write nothing.")
+    mode.add_argument("--confirm-ram-write", action="store_true",
+                      help="opt-in: apply the volatile RAM patch (gone at power-off).")
+    mode.add_argument("--restore", action="store_true",
+                      help="write the stock/backed-up bytes back (no reboot).")
     ap.add_argument("--pid", type=lambda x: int(x, 0), default=A6700_MSC_PID)
     args = ap.parse_args()
 
