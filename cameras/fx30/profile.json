@@ -1,0 +1,20 @@
+{
+  "name": "Sony FX30",
+  "model": "ILME-FX30",
+  "firmware_verified": null,
+  "sensor": "APS-C 26 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": null,
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "planned, same sensor+chip as A6700",
+  "notes": "Same 26 MP APS-C BIONZ XR sensor as the A6700. PID/firmware to confirm on hardware."
+}

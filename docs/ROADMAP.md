@@ -58,9 +58,11 @@ propriétaire du firmware.
   écriture permanente ».
 
 ### 3. Autres boîtiers Sony Alpha
-- **BIONZ XR APS-C** d'abord (les plus proches de l'A6700) : ex. FX30.
+- **Sony APS-C (BIONZ XR) d'abord** — profils modulaires `cameras/` : **A6700**
+  (fait), **FX30**, **ZV-E10 II** (même capteur 26 MP APS-C BIONZ XR).
 - **BIONZ XR Full-Frame** ensuite : ex. A7 IV, A7C II.
-- **BIONZ X** par la suite (dialecte de protocole plus ancien) : ex. A6400, A6600.
+- **BIONZ X** par la suite (dialecte plus ancien) : A6400, A6600, ZV-E10 Mark I.
+  (ZV-E1 = Full-Frame, traité à part.)
 - Aide de la communauté bienvenue pour valider PID, jeux de propriétés et codes de
   contrôle par boîtier.
 

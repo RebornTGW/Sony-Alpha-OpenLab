@@ -73,6 +73,11 @@ Development priority:
 4. **BIONZ X** bodies (A6400, A6600) — handled afterward, as their protocol
    generation differs.
 
+**Per-camera profiles** live under [`cameras/`](cameras/) (modular Sony APS-C
+BIONZ XR architecture): **`a6700`** (primary), **`fx30`**, **`zve10m2`** — same 26 MP
+APS-C BIONZ XR sensor. Load via `from cameras import load_profile`. Older **BIONZ X**
+bodies (A6400, A6600, ZV-E10 Mark I) come later; **ZV-E1 is Full-Frame** (separate).
+
 > ✅ = actively tested · others = planned. Compatibility is validated per body;
 > a code being present in the protocol does not mean it is exposed on every model.
 > Want your body supported? See [Community & ideas](#-community--ideas).
@@ -496,6 +501,7 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ```
 A6700-Remote-Tools/
+├── cameras/             # per-body profiles (a6700, fx30, zve10m2) + cameras.py loader
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking

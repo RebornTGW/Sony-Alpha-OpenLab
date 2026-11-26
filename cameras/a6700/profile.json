@@ -1,0 +1,20 @@
+{
+  "name": "Sony A6700",
+  "model": "ILCE-6700",
+  "firmware_verified": "2.00",
+  "sensor": "APS-C 26 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": "0x0E78",
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "primary target, verified live",
+  "notes": "Reference body. Control (S1/S2/movie-rec) and image retrieval proven."
+}

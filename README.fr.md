@@ -75,6 +75,12 @@ Priorité de développement :
 4. Boîtiers **BIONZ X** (A6400, A6600) — traités ensuite, leur génération de
    protocole étant différente.
 
+**Profils par boîtier** dans [`cameras/`](cameras/) (architecture modulaire Sony
+APS-C BIONZ XR) : **`a6700`** (principal), **`fx30`**, **`zve10m2`** — même capteur
+26 MP APS-C BIONZ XR. Chargement via `from cameras import load_profile`. Les boîtiers
+**BIONZ X** (A6400, A6600, ZV-E10 Mark I) viendront ensuite ; **ZV-E1 = Full-Frame**
+(à part).
+
 > ✅ = activement testé · autres = prévus. La compatibilité est validée boîtier par
 > boîtier ; la présence d'un code dans le protocole ne signifie pas qu'il est exposé
 > sur tous les modèles. Vous voulez votre boîtier pris en charge ? Voir
@@ -511,6 +517,7 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ```
 A6700-Remote-Tools/
+├── cameras/             # profils par boîtier (a6700, fx30, zve10m2) + loader cameras.py
 ├── probe_a6700.py       # sonde diagnostic USB lecture seule
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # capture multi-exposition automatisée + empilement optionnel

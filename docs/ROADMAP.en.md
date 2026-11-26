@@ -49,9 +49,11 @@ describes **capabilities and goals only** — no proprietary firmware internals.
 - This remains exploratory and is pursued only within the no-permanent-write policy.
 
 ### 3. More Sony Alpha bodies
-- **BIONZ XR APS-C** first (closest to the A6700): e.g. FX30.
+- **Sony APS-C (BIONZ XR) first** — modular `cameras/` profiles: **A6700** (done),
+  **FX30**, **ZV-E10 II** (same 26 MP APS-C BIONZ XR sensor).
 - **BIONZ XR Full-Frame** next: e.g. A7 IV, A7C II.
-- **BIONZ X** bodies afterward (older protocol dialect): e.g. A6400, A6600.
+- **BIONZ X** bodies afterward (older dialect): A6400, A6600, ZV-E10 Mark I.
+  (ZV-E1 is Full-Frame, handled separately.)
 - Community help wanted to validate per-body PIDs, property sets and control codes.
 
 ---

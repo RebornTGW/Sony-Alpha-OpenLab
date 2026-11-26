@@ -1,0 +1,20 @@
+{
+  "name": "Sony ZV-E10 II",
+  "model": "ILCZE-10M2",
+  "firmware_verified": null,
+  "sensor": "APS-C 26 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": null,
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "placeholder, same sensor+chip family as A6700",
+  "notes": "ZV-E10 II = 26 MP APS-C BIONZ XR. NOT ZV-E1 (Full-Frame). NOT ZV-E10 Mark I / A6400 / A6600 (older BIONZ X, later)."
+}
