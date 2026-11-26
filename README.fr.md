@@ -39,8 +39,8 @@ Prouvé **en direct sur boîtier réel** (firmware 2.00, PC Remote `PID 0x0E78`)
   `0xD2C8` renvoient tous `OK`.
 - **Récupération image :** vue pleine résolution lue sur `0xFFFFC001` (**~31,2 Mo RAW**),
   JPEG ou `.ARW`, via `GetObjectInfo` + `GetObject`.
-- **Multi-exposition :** `multi_exposure.py` capture + fusion (`average`/`lighten`/
-  `screen`) fonctionnel de bout en bout.
+- **Multi-exposition :** `multi_exposure.py` capture + les 4 modes de fusion Fujifilm
+  (`additive`/`average`/`bright`/`dark`, + `screen`) fonctionnels de bout en bout.
 - **Open Gate (recherche) :** tables capteur + encodeur pour **3840×2560** cartographiées
   en statique ; la bascule menu 3:2 est bloquée au niveau applicatif (HAITA) — voir
   [`docs/RESULTS.md`](docs/RESULTS.md). Voie RAM-only = recherche, non livrée.
@@ -419,24 +419,44 @@ python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-second
 
 Bâti sur les commandes de contrôle de session **validées** (`still_capture_mode`
 0x5013 + `ControlDevice` 0x9207 S1/S2), `multi_exposure.py` capture **N vues à
-intervalle contrôlé** et peut éventuellement les **empiler** localement (average =
-fusion multi-exposition classique, ou lighten = filé d'étoiles). Il exige aussi
-`--confirm-session-write` et prend de vraies photos.
+intervalle contrôlé** et peut les **empiler** localement avec les quatre **modes de
+multi-exposition Fujifilm**. Il exige `--confirm-session-write` et prend de vraies photos.
+
+### Modes de multi-exposition Fujifilm (`--stack-mode`)
+
+Tout l'empilement se fait en **float32 linéaire** (JPEG 8 bits, ou RAW/TIFF 16 bits
+décodés si `rawpy`/`tifffile` sont installés), pour éviter le banding dans les ombres.
+
+| Mode | Alias | Calcul | Idéal pour |
+|---|---|---|---|
+| `additive` | | `clip(ΣvueN)` | multi-exposition additive façon film |
+| `average` | | `Σvue / N` | équilibré, multi-exposition classique |
+| `bright` | `lighten` | **max** par pixel | filés d'étoiles, sujet clair sur fond sombre |
+| `dark` | `darken` | **min** par pixel | silhouettes sur fond clair |
+| `screen` | | `1-(1-A)(1-B)` | rendu double-exposition doux Fuji/Canon |
+
+> ⚠️ **`additive` ajoute de la lumière.** Deux vues ajoutent ~**+1 EV**, N vues
+> **+log₂(N) EV**. Réglez une compensation d'exposition négative sur le boîtier ou les
+> hautes lumières saturent — l'outil affiche la valeur exacte quand vous choisissez
+> `additive`.
 
 ```powershell
 # 5 vues, 1 s d'intervalle (AF avant chaque prise)
 python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
 
-# Mode drive continu/bracket, sans AF, téléchargement auto de chaque vue (0xFFFFC001)
-# et empilement en une seule image de multi-exposition
-python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
-    --download-dir out/ --stack out/multi.png --stack-mode average
+# Multi-exposition additive façon film, téléchargement auto de chaque vue (0xFFFFC001)
+python multi_exposure.py --confirm-session-write --shots 4 --no-af \
+    --download-dir out/ --stack out/multi.png --stack-mode additive
 
-# HORS-LIGNE : empiler un dossier (sans boîtier, sans --confirm-session-write)
-python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
+# HORS-LIGNE filé d'étoiles : empiler un dossier, sans boîtier (bright = max par pixel)
+python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode bright
 
-# Double exposition interactive : Vue 1, recadrage, Entrée pour la Vue 2, fusion auto
-python multi_exposure.py --confirm-session-write --interactive --shots 2 \
+# --stack-all : rendre les 4 modes de base à partir des mêmes vues pour comparer
+python multi_exposure.py --stack-dir ./frames --stack out/me.png --stack-all
+#   -> out/me_additive.png  out/me_average.png  out/me_bright.png  out/me_dark.png
+
+# Pas-à-pas Fujifilm : [Entrée] suivante / [r] refaire la dernière / [q] finir & fusionner
+python multi_exposure.py --confirm-session-write --interactive --shots 3 \
     --download-dir out/ --stack out/double.png --stack-mode screen
 
 # Aperçu Live View superposé en temps réel (aligner la Vue 2 ; Espace = déclencher)
@@ -450,16 +470,19 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 | `--no-af` | saute le demi-appui S1 (AF) ; S2 pleine pression seulement |
 | `--drive-value V` | règle `still_capture_mode` (0x5013) d'abord (valeur d'énum continu/bracket) |
 | `--download-dir DIR` | télécharge auto chaque vue via le handle Sony `0xFFFFC001` (`GetObject`, lecture seule) |
-| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | empile les images : `average`, `lighten` ou `screen` |
-| `--interactive` | pas-à-pas : Vue 1, pause pour recadrer, Entrée pour chaque vue suivante, puis fusion |
+| `--stack OUT` / `--stack-dir DIR` | fichier de sortie / dossier source hors-ligne |
+| `--stack-mode` | `additive`, `average`, `bright`/`lighten`, `dark`/`darken`, `screen` |
+| `--stack-all` | rend les 4 modes Fujifilm de base à partir des mêmes vues |
+| `--interactive` / `--manual-step` | pas-à-pas : `[Entrée]` suivante / `[r]` refaire la dernière / `[q]` finir & fusionner |
 | `--live-overlay` / `--overlay-opacity` | fenêtre live superposant le flux (`0xFFFFC002`) sur la Vue 1 ; Espace déclenche |
 
-**Expérience double exposition native.** `--live-overlay` reproduit le flux natif
-Fujifilm/Canon : prendre la Vue 1, voir le Live View superposé en temps réel pour
-aligner la Vue 2, appuyer sur **Espace** pour déclencher, et la fusion finale est
-générée instantanément. `screen` (`1-(1-A)(1-B)`) est la fusion double-exposition
-classique ; `lighten` garde les pixels les plus clairs. La fenêtre utilise `tkinter`
-(fourni avec Python) + Pillow — aucune dépendance supplémentaire.
+**Expérience double exposition native.** `--interactive` reproduit le flux Fujifilm :
+prendre la Vue 1, puis pour chaque vue suivante choisir `[Entrée]` pour déclencher,
+`[r]` pour refaire la dernière, ou `[q]` pour terminer — un aperçu est écrit après
+chaque prise pour juger la composition. `--live-overlay` va plus loin : il superpose le
+Live View en temps réel sur la/les vue(s) précédente(s) pour aligner avant d'appuyer sur
+**Espace**. La fenêtre utilise `tkinter` (fourni avec Python) + Pillow — aucune
+dépendance supplémentaire.
 
 **Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
 `GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial

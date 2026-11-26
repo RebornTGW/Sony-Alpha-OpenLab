@@ -37,8 +37,8 @@ Proven **live on real hardware** (firmware 2.00, PC Remote `PID 0x0E78`):
   `0xD2C8` all return `OK`.
 - **Image retrieval:** full-res frame pulled from `0xFFFFC001` (**~31.2 MB RAW**), JPEG
   or `.ARW`, via `GetObjectInfo` + `GetObject`.
-- **Multi-exposure:** `multi_exposure.py` live capture + blend (`average`/`lighten`/
-  `screen`) working end-to-end.
+- **Multi-exposure:** `multi_exposure.py` live capture + the 4 Fujifilm blend modes
+  (`additive`/`average`/`bright`/`dark`, + `screen`) working end-to-end.
 - **Open Gate (research):** sensor + encoder tables for **3840×2560** statically
   mapped; the 3:2 menu switch is blocked at the app layer (HAITA) — see
   [`docs/RESULTS.md`](docs/RESULTS.en.md). RAM-only path is research, not shipped.
@@ -404,24 +404,44 @@ python experiment_a6700.py --confirm-session-write --test-movie-rec --rec-second
 
 Built on the **validated** session-only control commands (`still_capture_mode`
 0x5013 + `ControlDevice` 0x9207 S1/S2), `multi_exposure.py` captures **N frames at a
-controlled interval** and can optionally **stack** them locally (average = classic
-multi-exposure blend, or lighten = star-trail style). It also requires
-`--confirm-session-write` and takes real pictures.
+controlled interval** and can optionally **stack** them locally using the four
+**Fujifilm multi-exposure modes**. It requires `--confirm-session-write` and takes
+real pictures.
+
+### Fujifilm multi-exposure modes (`--stack-mode`)
+
+All stacking is done in **float32 linear space** (8-bit JPEG or 16-bit decoded RAW/TIFF
+if `rawpy`/`tifffile` are installed), so dark gradients don't band.
+
+| Mode | Alias | Math | Best for |
+|---|---|---|---|
+| `additive` | | `clip(ΣframeN)` | true film-style additive exposure |
+| `average` | | `Σframe / N` | balanced, classic multi-exposure |
+| `bright` | `lighten` | per-pixel **max** | light trails, stars, bright subject on dark bg |
+| `dark` | `darken` | per-pixel **min** | silhouettes against a bright background |
+| `screen` | | `1-(1-A)(1-B)` | soft Fuji/Canon double-exposure look |
+
+> ⚠️ **`additive` adds light.** Two frames add about **+1 EV**, N frames **+log₂(N) EV**.
+> Dial in negative exposure compensation on the camera or the highlights clip — the
+> tool prints the exact amount when you pick `additive`.
 
 ```powershell
 # 5 frames, 1s apart (AF before each shot)
 python multi_exposure.py --confirm-session-write --shots 5 --interval 1.0
 
-# Continuous/bracket drive mode, no AF, auto-download each frame (0xFFFFC001) and
-# stack them into a single multi-exposure image
-python multi_exposure.py --confirm-session-write --shots 8 --no-af --drive-value 0x2 \
-    --download-dir out/ --stack out/multi.png --stack-mode average
+# Additive film-style multi-exposure, auto-download each frame (0xFFFFC001)
+python multi_exposure.py --confirm-session-write --shots 4 --no-af \
+    --download-dir out/ --stack out/multi.png --stack-mode additive
 
-# OFFLINE: stack a folder (no camera, no --confirm-session-write needed)
-python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode lighten
+# OFFLINE star trails: stack a folder, no camera (bright = per-pixel max)
+python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode bright
 
-# Interactive double exposure: shoot frame 1, reframe, Enter for frame 2, auto-stack
-python multi_exposure.py --confirm-session-write --interactive --shots 2 \
+# --stack-all: render ALL 4 core modes from the same frames to compare
+python multi_exposure.py --stack-dir ./frames --stack out/me.png --stack-all
+#   -> out/me_additive.png  out/me_average.png  out/me_bright.png  out/me_dark.png
+
+# Fujifilm step-by-step: [Enter] next / [r] retake last / [q] finish & stack
+python multi_exposure.py --confirm-session-write --interactive --shots 3 \
     --download-dir out/ --stack out/double.png --stack-mode screen
 
 # Real-time Live View overlay (align frame 2 over frame 1 live; Space to capture)
@@ -435,15 +455,18 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 | `--no-af` | skip the S1 (AF) half-press; S2 full-press only |
 | `--drive-value V` | set `still_capture_mode` (0x5013) first (continuous/bracket enum value) |
 | `--download-dir DIR` | auto-download each frame via the Sony PC-save handle `0xFFFFC001` (read-only `GetObject`) |
-| `--stack OUT` / `--stack-dir DIR` / `--stack-mode` | stack images: `average`, `lighten`, or `screen` |
-| `--interactive` | step-by-step: shoot frame 1, pause to reframe, Enter for each next frame, then stack |
+| `--stack OUT` / `--stack-dir DIR` | stack output file / offline source folder |
+| `--stack-mode` | `additive`, `average`, `bright`/`lighten`, `dark`/`darken`, `screen` |
+| `--stack-all` | render all 4 core Fujifilm modes from the same frames at once |
+| `--interactive` / `--manual-step` | step-by-step: `[Enter]` next / `[r]` retake last / `[q]` finish & stack |
 | `--live-overlay` / `--overlay-opacity` | live window blending the feed (`0xFFFFC002`) over frame 1; Space captures |
 
-**Native double-exposure experience.** `--live-overlay` reproduces the Fujifilm/Canon
-in-camera flow: shoot frame 1, see the real-time Live View superimposed over it to
-align frame 2, press **Space** to capture, and the final blend is generated instantly.
-`screen` (`1-(1-A)(1-B)`) is the classic double-exposure blend; `lighten` keeps the
-brightest pixels. The overlay window uses `tkinter` (bundled with Python) + Pillow —
+**Native double-exposure experience.** `--interactive` reproduces the Fujifilm
+in-camera flow: shoot frame 1, then for each next frame choose `[Enter]` to shoot,
+`[r]` to retake the last one, or `[q]` to finish — a running preview is written after
+each shot so you can judge the composition. `--live-overlay` goes further: it shows the
+real-time Live View superimposed over the previous frame(s) so you can align before
+pressing **Space**. The overlay window uses `tkinter` (bundled with Python) + Pillow —
 no extra dependency.
 
 **Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose

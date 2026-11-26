@@ -13,8 +13,10 @@ Using only the confirmed session-only control commands:
   - controlled shutter via ControlDevice(0x9207): S1 (0xD2C1) + S2 (0xD2C2),
 it captures N frames at a controlled interval (multi-frame / multi-exposure
 sequence). It can then optionally pull the newly captured images over PTP
-(read-only GetObject) and stack them locally (average = classic multi-exposure,
-or lighten = star-trail style).
+(read-only GetObject) and stack them locally with the four Fujifilm
+multi-exposure modes (additive, average, bright/lighten, dark/darken) plus a
+screen blend - all computed in float32 linear space (--stack-all renders all
+four core modes at once).
 
 Nothing is written to the camera's persistent storage or firmware; the only
 camera-side effects are the captures themselves and volatile session state.
@@ -278,10 +280,131 @@ def download_objects(dev, handles, out_dir):
 # Local stacking
 # ---------------------------------------------------------------------------
 
+# Fujifilm Multi-Exposure modes. Aliases resolve to the canonical name.
+MODE_ALIASES = {"lighten": "bright", "darken": "dark"}
+CORE_MODES = ("additive", "average", "bright", "dark")   # the 4 Fujifilm modes
+ALL_MODES = ("additive", "average", "bright", "dark", "screen")
+
+
+def _norm_mode(mode):
+    """Resolve an alias (lighten->bright, darken->dark) to the canonical name."""
+    return MODE_ALIASES.get(mode, mode)
+
+
+def _load_frame(path):
+    """Load one frame as a float32 HxWx3 array + its white level (max value).
+    Handles 8-bit JPEG/PNG, 16-bit PNG/TIFF, and (if rawpy is installed) RAW.
+    Returns (None, None) when the frame can't be decoded."""
+    from PIL import Image
+    import numpy as np
+    ext = os.path.splitext(path)[1].lower()
+    if ext in (".arw", ".dng", ".nef", ".cr2", ".cr3", ".raf", ".rw2"):
+        try:
+            import rawpy
+        except ImportError:
+            print(f"[stack ] skip RAW {os.path.basename(path)} "
+                  "(install rawpy to decode RAW: pip install rawpy).")
+            return None, None
+        with rawpy.imread(path) as raw:
+            rgb16 = raw.postprocess(output_bps=16, no_auto_bright=True,
+                                    use_camera_wb=True)
+        return np.asarray(rgb16, dtype=np.float32), 65535.0
+    im = Image.open(path)
+    if im.mode in ("I", "I;16", "I;16B", "I;16L", "F"):   # 16-bit / float images
+        arr = np.asarray(im, dtype=np.float32)
+        if arr.ndim == 2:
+            arr = np.repeat(arr[:, :, None], 3, axis=2)
+        return arr, 65535.0
+    arr = np.asarray(im.convert("RGB"), dtype=np.float32)
+    return arr, 255.0
+
+
+def _load_frames(paths):
+    """Load frames into a common float32 range. If any frame is 16-bit, 8-bit
+    frames are scaled up to the 16-bit range so the math stays linear and free of
+    shadow banding. Returns (frames, max_val, base_size)."""
+    frames, maxes, base_size = [], [], None
+    for p in paths:
+        try:
+            arr, mv = _load_frame(p)
+        except Exception as e:  # noqa: BLE001
+            print(f"[stack ] skip {p}: {e}")
+            continue
+        if arr is None:
+            continue
+        size = (arr.shape[1], arr.shape[0])
+        if base_size is None:
+            base_size = size
+        elif size != base_size:
+            print(f"[stack ] size mismatch for {p} ({size} vs {base_size}); skip.")
+            continue
+        frames.append(arr)
+        maxes.append(mv)
+    if not frames:
+        return [], 255.0, None
+    max_val = max(maxes)
+    for i, mv in enumerate(maxes):      # unify 8-bit frames up to 16-bit range
+        if mv != max_val:
+            frames[i] = frames[i] * (max_val / mv)
+    return frames, max_val, base_size
+
+
+def _blend(frames, mode, max_val):
+    """Blend a list of float32 HxWx3 frames by `mode`, in float32 linear space."""
+    import numpy as np
+    mode = _norm_mode(mode)
+    stack = np.stack(frames, axis=0)       # (N, H, W, 3), float32
+    n = stack.shape[0]
+    if mode == "additive":                 # film-style additive exposure
+        out = np.clip(stack.sum(axis=0), 0.0, max_val)
+    elif mode == "average":                # balanced exposure mean
+        out = stack.sum(axis=0) / float(n)
+    elif mode == "bright":                 # per-pixel max (light trails, stars)
+        out = np.maximum.reduce(stack)
+    elif mode == "dark":                   # per-pixel min (silhouettes)
+        out = np.minimum.reduce(stack)
+    elif mode == "screen":                 # 1-(1-A)(1-B), soft double-exposure
+        inv = max_val - stack
+        prod = inv[0].copy()
+        for k in range(1, n):
+            prod *= inv[k] / max_val
+        out = max_val - prod
+    else:
+        raise ValueError(f"unknown stack mode: {mode}")
+    return out
+
+
+def _save_result(arr, max_val, out_path):
+    """Save a float32 result. 16-bit TIFF when the extension asks for it and the
+    source was 16-bit (needs tifffile); otherwise 8-bit PNG/JPEG."""
+    from PIL import Image
+    import numpy as np
+    ext = os.path.splitext(out_path)[1].lower()
+    if ext in (".tif", ".tiff") and max_val > 255:
+        out16 = np.clip(arr / max_val * 65535.0, 0, 65535).astype("uint16")
+        try:
+            import tifffile
+            tifffile.imwrite(out_path, out16)
+            return
+        except ImportError:
+            print("[stack ] 16-bit TIFF needs tifffile; saving 8-bit instead.")
+    out8 = np.clip(arr / max_val * 255.0, 0, 255).astype("uint8")
+    Image.fromarray(out8).save(out_path)
+
+
+def _warn_additive_ev(n):
+    """Additive stacking of N frames adds ~+log2(N) EV; remind to compensate."""
+    import math
+    ev = math.log2(n) if n > 0 else 0.0
+    print(f"[stack ] additive: {n} frames add about +{ev:.1f} EV of brightness. "
+          f"Set NEGATIVE exposure compensation (~-{ev:.1f} EV total) on the camera "
+          "or the highlights will clip.")
+
+
 def stack_images(paths, out_path, mode="average"):
     try:
-        from PIL import Image
-        import numpy as np
+        import numpy as np  # noqa: F401
+        from PIL import Image  # noqa: F401
     except ImportError:
         print("[stack ] Pillow/numpy not installed -> skipping stacking "
               "(pip install pillow numpy). Stack the files manually if needed.")
@@ -289,49 +412,67 @@ def stack_images(paths, out_path, mode="average"):
     if not paths:
         print("[stack ] no images to stack.")
         return False
-
-    acc = None
-    n = 0
-    base_size = None
-    for p in paths:
-        try:
-            im = Image.open(p).convert("RGB")
-        except Exception as e:  # noqa: BLE001
-            print(f"[stack ] skip {p}: {e}")
-            continue
-        if base_size is None:
-            base_size = im.size
-        elif im.size != base_size:
-            print(f"[stack ] size mismatch for {p} ({im.size} vs {base_size}); skip.")
-            continue
-        arr = np.asarray(im, dtype=np.float64)
-        if acc is None:
-            acc = np.zeros_like(arr) if mode == "average" else arr.copy()
-            if mode != "average":
-                n += 1
-                continue
-        if mode == "average":
-            acc += arr
-            n += 1
-        elif mode == "lighten":
-            acc = np.maximum(acc, arr)
-            n += 1
-        elif mode == "screen":
-            # screen: 1 - (1-A)*(1-B); classic double-exposure blend (Fuji/Canon).
-            acc = 255.0 - (255.0 - acc) * (255.0 - arr) / 255.0
-            n += 1
-        else:
-            print(f"[stack ] unknown mode {mode}")
-            return False
-    if acc is None:
+    canon = _norm_mode(mode)
+    if canon not in ALL_MODES:
+        print(f"[stack ] unknown mode {mode}")
+        return False
+    frames, max_val, _ = _load_frames(paths)
+    if not frames:
         print("[stack ] no usable images.")
         return False
-    if mode == "average":
-        acc /= max(n, 1)
-    from PIL import Image as _Image
-    _Image.fromarray(acc.clip(0, 255).astype("uint8")).save(out_path)
-    print(f"[stack ] {mode} of {n} image(s) -> {out_path}")
+    if canon == "additive":
+        _warn_additive_ev(len(frames))
+    out = _blend(frames, canon, max_val)
+    _save_result(out, max_val, out_path)
+    print(f"[stack ] {canon} of {len(frames)} image(s) -> {out_path}")
     return True
+
+
+def stack_all_modes(paths, base_out):
+    """Render all 4 core Fujifilm modes from the SAME frames into
+    <stem>_additive / _average / _bright / _dark.<ext>. Returns output paths."""
+    try:
+        import numpy as np  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        print("[stack ] Pillow/numpy not installed -> cannot --stack-all.")
+        return []
+    frames, max_val, _ = _load_frames(paths)
+    if not frames:
+        print("[stack ] no usable images to --stack-all.")
+        return []
+    stem, ext = os.path.splitext(base_out or "multi_exposure.png")
+    ext = ext or ".png"
+    outs = []
+    for m in CORE_MODES:
+        if m == "additive":
+            _warn_additive_ev(len(frames))
+        out = _blend(frames, m, max_val)
+        op = f"{stem}_{m}{ext}"
+        _save_result(out, max_val, op)
+        print(f"[stack ] {m} of {len(frames)} image(s) -> {op}")
+        outs.append(op)
+    return outs
+
+
+def _write_preview(paths, download_dir):
+    """Write a quick average preview of the frames captured so far (for composition
+    during interactive shooting). Best-effort; silent without Pillow/numpy."""
+    try:
+        import numpy as np  # noqa: F401
+        from PIL import Image  # noqa: F401
+    except ImportError:
+        return
+    frames, max_val, _ = _load_frames(paths)
+    if not frames:
+        return
+    out = _blend(frames, "average", max_val)
+    prev = os.path.join(download_dir, "_preview.png")
+    try:
+        _save_result(out, max_val, prev)
+        print(f"         preview -> {prev}")
+    except Exception:  # noqa: BLE001
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -367,38 +508,69 @@ def fetch_liveview(dev):
         return None
 
 
-def interactive_capture(dev, shots, af, download_dir, out_path, stack_mode):
-    """Step-by-step double exposure: capture frame 1, then wait for the user to
-    reframe before each next frame, then stack immediately."""
+def interactive_capture(dev, shots, af, download_dir, out_path, stack_mode,
+                        stack_all=False):
+    """Fujifilm-style step-by-step multi-exposure. Capture frame 1, then before
+    each next frame wait for a key:
+      [Enter] shoot next frame | [r] retake last frame | [q] finish & stack now.
+    After each shot a running average preview is written to the download dir so
+    you can judge composition. Frames are stacked at the end (or --stack-all)."""
     download_dir = download_dir or "me_frames"
     os.makedirs(download_dir, exist_ok=True)
     out_path = out_path or "multi_exposure.png"
     saved = []
-    for i in range(1, shots + 1):
-        if i == 1:
-            print(f"[inter ] capturing frame 1/{shots} (base)...")
-        else:
-            try:
-                input(f"[inter ] reframe the next subject, then press Enter to "
-                      f"capture frame {i}/{shots} (Ctrl+C to stop)...")
-            except (EOFError, KeyboardInterrupt):
-                print("\n[inter ] stopped by user.")
-                break
+
+    def _shoot(idx):
+        print(f"[inter ] capturing frame {idx}/{shots}...")
         capture_one(dev, af=af)
         time.sleep(0.4)
-        p = fetch_pc_save_object(dev, download_dir, i)
-        if p:
-            saved.append(p)
+        return fetch_pc_save_object(dev, download_dir, idx)
+
+    p = _shoot(1)
+    if p:
+        saved.append(p)
+        _write_preview(saved, download_dir)
+    else:
+        print("         (no image on 0xFFFFC001 - check Save Destination)")
+
+    while len(saved) < shots:
+        nxt = len(saved) + 1
+        try:
+            choice = input(f"[inter ] frame {len(saved)}/{shots} saved. "
+                           "[Enter]=shoot next  [r]=retake last  [q]=finish: "
+                           ).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n[inter ] stopped by user.")
+            break
+        if choice == "q":
+            break
+        if choice == "r":
+            if saved:
+                print("[inter ] retaking last frame...")
+                rp = _shoot(len(saved))
+                if rp:
+                    saved[-1] = rp
+                    _write_preview(saved, download_dir)
+            continue
+        np_path = _shoot(nxt)
+        if np_path:
+            saved.append(np_path)
+            _write_preview(saved, download_dir)
         else:
             print("         (no image on 0xFFFFC001 - check Save Destination)")
+
     if len(saved) >= 2:
-        stack_images(saved, out_path, mode=stack_mode)
+        if stack_all:
+            stack_all_modes(saved, out_path)
+        else:
+            stack_images(saved, out_path, mode=stack_mode)
     else:
         print("[inter ] need >= 2 downloaded frames to stack.")
     return saved
 
 
-def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend):
+def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend,
+                 stack_all=False):
     """Capture frame 1, then open a light tkinter window showing the live Sony feed
     (0xFFFFC002) blended over frame 1 in real time, so you can align the next frame.
     Space triggers the next capture; Esc/q quits. Final stack uses `blend`."""
@@ -438,12 +610,20 @@ def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend):
     status = tk.Label(root, text="Align the next subject, then press Space.")
     status.pack()
 
+    mode = _norm_mode(blend)
+
     def blend_preview(lv):
         lv = lv.resize((pw, ph))
         b = (np.asarray(lv, dtype=np.float64) * float(opacity)).clip(0, 255)
-        if blend == "screen":
+        if mode == "screen":
             out = 255.0 - (255.0 - base_arr) * (255.0 - b) / 255.0
-        else:  # lighten
+        elif mode == "dark":
+            out = np.minimum(base_arr, b)
+        elif mode == "additive":
+            out = base_arr + b
+        elif mode == "average":
+            out = (base_arr + b) / 2.0
+        else:  # bright (per-pixel max) - default live preview
             out = np.maximum(base_arr, b)
         return Image.fromarray(out.clip(0, 255).astype("uint8"))
 
@@ -487,7 +667,10 @@ def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend):
     root.mainloop()
 
     if len(state["saved"]) >= 2:
-        stack_images(state["saved"], out_path, mode=blend)
+        if stack_all:
+            stack_all_modes(state["saved"], out_path)
+        else:
+            stack_images(state["saved"], out_path, mode=blend)
     else:
         print("[live  ] need >= 2 frames to stack.")
     return state["saved"]
@@ -525,13 +708,22 @@ def main():
                     help="Stack images into this output file.")
     ap.add_argument("--stack-dir", default=None,
                     help="Directory of images to stack (defaults to --download-dir).")
-    ap.add_argument("--stack-mode", choices=("average", "lighten", "screen"),
+    ap.add_argument("--stack-mode",
+                    choices=("additive", "average", "bright", "lighten",
+                             "dark", "darken", "screen"),
                     default="average",
-                    help="average = multi-exposure blend; lighten = max (star trails); "
-                         "screen = 1-(1-A)(1-B) (Fuji/Canon double-exposure look).")
-    ap.add_argument("--interactive", action="store_true",
-                    help="Step-by-step: capture frame 1, wait for Enter to reframe "
-                         "before each next frame, then stack immediately.")
+                    help="Fujifilm multi-exposure blend: additive = film-style sum "
+                         "(clipped; add negative EV); average = mean (classic); "
+                         "bright/lighten = per-pixel max (star trails, bright subjects); "
+                         "dark/darken = per-pixel min (silhouettes); "
+                         "screen = 1-(1-A)(1-B) (soft double-exposure look).")
+    ap.add_argument("--stack-all", action="store_true",
+                    help="Render ALL 4 core Fujifilm modes from the same frames into "
+                         "<stem>_additive/_average/_bright/_dark so you can compare.")
+    ap.add_argument("--interactive", "--manual-step", action="store_true",
+                    dest="interactive",
+                    help="Fujifilm step-by-step: shoot frame 1, then per frame choose "
+                         "[Enter] shoot next / [r] retake last / [q] finish & stack.")
     ap.add_argument("--live-overlay", action="store_true",
                     help="Open a window showing the live feed (0xFFFFC002) blended "
                          "over frame 1 in real time; Space captures. Needs tkinter+Pillow.")
@@ -554,11 +746,14 @@ def main():
     # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
     # it runs directly, no --confirm-session-write needed.
     if not args.confirm_session_write:
-        if args.stack_dir and args.stack:
+        if args.stack_dir and (args.stack or args.stack_all):
             print("=== multi_exposure: OFFLINE stacking (no camera) ===")
             paths = sorted(glob.glob(os.path.join(args.stack_dir, "*")))
             if not paths:
                 sys.exit(f"[INFO] no images found in {args.stack_dir}")
+            if args.stack_all:
+                outs = stack_all_modes(paths, args.stack)
+                sys.exit(0 if outs else 1)
             ok = stack_images(paths, args.stack, mode=args.stack_mode)
             sys.exit(0 if ok else 1)
         sys.exit("[REFUSED] Capturing triggers REAL pictures on the camera.\n"
@@ -593,19 +788,20 @@ def main():
             # Real-time Live View overlay over frame 1; Space captures the rest.
             live_overlay(dev, args.shots, af=not args.no_af,
                          download_dir=args.download_dir, out_path=args.stack,
-                         opacity=args.overlay_opacity, blend=args.stack_mode)
+                         opacity=args.overlay_opacity, blend=args.stack_mode,
+                         stack_all=args.stack_all)
         elif args.interactive:
             # Step-by-step double exposure with a reframe pause between frames.
             interactive_capture(dev, args.shots, af=not args.no_af,
                                 download_dir=args.download_dir, out_path=args.stack,
-                                stack_mode=args.stack_mode)
+                                stack_mode=args.stack_mode, stack_all=args.stack_all)
         else:
             # Timed sequence, auto-downloading each frame from 0xFFFFC001.
             downloaded = capture_sequence(dev, args.shots, args.interval,
                                           af=not args.no_af,
                                           download_dir=args.download_dir)
             time.sleep(0.3)
-            if args.stack:
+            if args.stack or args.stack_all:
                 src_dir = args.stack_dir or args.download_dir
                 if downloaded:
                     paths = downloaded
@@ -614,7 +810,10 @@ def main():
                 else:
                     paths = []
                     print("[stack ] no source images (use --download-dir/--stack-dir).")
-                stack_images(paths, args.stack, mode=args.stack_mode)
+                if args.stack_all:
+                    stack_all_modes(paths, args.stack)
+                else:
+                    stack_images(paths, args.stack, mode=args.stack_mode)
 
     except PtpError as e:
         sys.exit(f"[ERROR] {e}")
