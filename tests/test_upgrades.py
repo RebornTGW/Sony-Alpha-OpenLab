@@ -125,6 +125,22 @@ class FakeScsi:
         return 0, struct.pack(">II", 2047, 512)
 
 
+class MockMem(rg.CameraMemory):
+    """Byte-addressable RAM mock for verify/patch/restore round-trips."""
+    def __init__(self):
+        self.ram = {}
+
+    def seed(self, addr, value16):
+        self.mem_write(addr, struct.pack("<H", value16))
+
+    def mem_read(self, addr, length):
+        return bytes(self.ram.get(addr + i, 0) for i in range(length))
+
+    def mem_write(self, addr, data):
+        for i, b in enumerate(data):
+            self.ram[addr + i] = b
+
+
 class TestSignatureScanner(unittest.TestCase):
     def test_is_movz(self):
         self.assertTrue(rg._is_movz_imm(_movz(0x0870, 2), 0x0870))
@@ -158,10 +174,42 @@ class TestMscProbe(unittest.TestCase):
     def test_probe_reports_responsive(self):
         self.assertTrue(rg.probe_msc(FakeScsi()))
 
-    def test_vendor_cdb_default_disabled(self):
-        # Without a configured vendor CDB, mem_read must refuse (safety default).
-        self.assertIsNone(rg.VENDOR_MEM_READ_CDB)
-        self.assertIsNone(rg.VENDOR_MEM_WRITE_CDB)
+    def test_default_transport_refuses(self):
+        # The MIT build ships no RAM transport: read/write must refuse, not guess.
+        with self.assertRaises(rg.MscError):
+            rg.CameraMemory().mem_read(0x1000, 2)
+        with self.assertRaises(rg.MscError):
+            rg.CameraMemory().mem_write(0x1000, b"\x00\x00")
+
+
+class TestVerifyPatchRestore(unittest.TestCase):
+    def _seeded(self, value=rg.STOCK_HEIGHT):
+        mem = MockMem()
+        for name in rg.HEIGHT_SITES:
+            mem.seed(rg.A6700_200_SITES[name], value)
+        return mem
+
+    def test_verify_reports_stock(self):
+        rows = rg.verify_sites(self._seeded())
+        self.assertTrue(all(lab == "stock 2160" for _, _, _, lab in rows))
+
+    def test_patch_then_restore(self):
+        mem = self._seeded()
+        bak = rg.patch_sites(mem, 0, rg.OPENGATE_HEIGHT, expect=rg.STOCK_HEIGHT)
+        self.assertEqual(len(bak), len(rg.HEIGHT_SITES))
+        self.assertTrue(all(lab == "open-gate 2560"
+                            for _, _, _, lab in rg.verify_sites(mem)))
+        rg.patch_sites(mem, 0, rg.STOCK_HEIGHT)          # restore
+        self.assertTrue(all(lab == "stock 2160"
+                            for _, _, _, lab in rg.verify_sites(mem)))
+
+    def test_patch_aborts_on_wrong_firmware(self):
+        mem = self._seeded(value=0x1234)                 # unexpected bytes
+        with self.assertRaises(rg.MscError):
+            rg.patch_sites(mem, 0, rg.OPENGATE_HEIGHT, expect=rg.STOCK_HEIGHT)
+        # aborted before any write: sites untouched
+        self.assertEqual(rg.read_height(mem, rg.A6700_200_SITES[rg.HEIGHT_SITES[0]]),
+                         0x1234)
 
 
 if __name__ == "__main__":

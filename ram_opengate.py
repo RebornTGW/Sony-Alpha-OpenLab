@@ -1,41 +1,55 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ram_opengate.py - volatile RAM Open Gate research helper for the Sony A6700.
+ram_opengate.py - volatile RAM Open Gate 3:2 research helper for the Sony A6700.
+
+Target: ILCE-6700, firmware 2.00. 3840x2160 -> 3840x2560 (and the exact 3:2
+window 5952x3968). RAM only: a cold boot (battery out ~10 s) removes everything.
 
 Why PTP alone does not work
 ---------------------------
-On A6700 firmware 2.00 the movie aspect ratio is NOT gated by the USB/PTP layer.
-Setting PTP `aspect_ratio (0xD211)` to 3:2 is ACCEPTED (the SetExtDevicePropValue
-returns OK) but then IGNORED while recording: the application framework re-asserts
-16:9. The lock lives in the HAITA capability layer inside `appFw.so`, where a
-data-driven feature check (`REC_MOVIE_ASPECT_RATIO_NOT_16_9`) refuses any non-16:9
-movie aspect. So no property write exposed over PTP can produce 3:2 video.
+Setting PTP aspect_ratio (0xD211) to 3:2 is ACCEPTED but then IGNORED: the HAITA
+capability layer in appFw.so re-asserts 16:9 (REC_MOVIE_ASPECT_RATIO_NOT_16_9).
+No PTP property write produces 3:2 video. The lock must be bypassed downstream, in
+the running camera's RAM.
 
-What the volatile RAM approach targets
----------------------------------------
-On BIONZ XR the recorded frame geometry ends up as a plain height word fed to the
-movie encoder in `libmpr.so`. The research idea is to change that height word in
-RAM only (3840x2160 height #0x870 -> 3840x2560 #0xa00), downstream of the HAITA
-menu gate, so nothing persistent is touched. It is volatile: a power-off or
-battery pull restores the stock firmware image.
+How Open Gate is actually reached on BIONZ XR (the real pipeline)
+-----------------------------------------------------------------
+This is NOT a host-side SCSI "poke memory" command. The verified route (used by the
+ArcaneLantern GPL kit, referenced, never copied here) is:
 
-Channel: USB Mass Storage (SCSI Bulk-Only Transport) vendor commands - the
-open-source Sony updater / PMCA-RE style service transport (A6700 Mass Storage
-PID 0x0E76). This file is ORIGINAL code (MIT): it reimplements the generic
-USB-MSC BOT framing and the ARM64 signature scan, and leaves the Sony vendor
-memory CDBs as clearly-marked constants to confirm on hardware. It contains NO
-firmware bytes and NO GPL code.
+  1. Camera in USB Mass Storage mode (VID 0x054C PID 0x0E76), standard SCSI BOT.
+  2. A Sony vendor command switches it to SERVICE MODE; it re-enumerates as
+     VID 0x054C PID 0x0336 (Sony-PMCA-RE, MIT, by ma1co, does this handshake).
+  3. A small native ARM64 helper is uploaded to the service partition, loaded ONCE,
+     and it is the helper - running on the camera - that reads/writes physical RAM
+     (av-cam.bin mapped at 0x401000000, libmpr.so) and writes one result file to the
+     RAM disk (/tmp_wbshd). The host then fetches the result and deletes the helper.
+  4. Each step compares every byte against its stock value before writing, writes
+     whole 64-byte lines, reads back, and self-undoes on any mismatch.
+
+So the memory read/write is done by an on-camera helper, not by this PC. This MIT
+build ships NO such helper: a correct helper embeds Sony firmware-derived tables and
+the vetted builds are GPL. This file therefore provides the MIT-clean HOST side:
+the read-only SCSI probe, the verified 2.00 address map and dimensions as plain
+facts, the ARM64 signature scanner, and the verify/patch/restore logic - all driven
+through a pluggable CameraMemory transport. Wire a transport (the service helper, or
+your own) to go live; until then RAM ops refuse rather than guess.
 
 Safety:
-  --verify-only (default): STRICTLY read-only. Locates the encoder height word by
-    signature and checks the stock bytes - writes nothing.
-  --probe-msc: STRICTLY read-only. Sends standard, safe SCSI commands (INQUIRY,
-    READ CAPACITY, TEST UNIT READY) to confirm BOT framing responds, before any
-    vendor memory CDB is ever used.
-  --confirm-ram-write: opt-in. Backs up the original RAM bytes, applies the
-    volatile patch (#0x870 -> #0xa00), reads back to verify; gone at power-off.
-  --restore: writes the backed-up / stock bytes back, no reboot.
+  --info         : no camera. Print the verified 2.00 facts + first command to run.
+  --probe-msc    : read-only. Standard INQUIRY / TEST UNIT READY / READ CAPACITY.
+  --verify-only  : (default) read-only. Locate + read the encoder height word, report.
+  --confirm-ram-write : opt-in. Backup -> write 0x0870->0x0A00 -> readback verify.
+  --restore      : write the stock height word back (no reboot).
+
+Key unverified caveats on A6700 2.00 (from the port notes; confirm on hardware):
+  * The contributed 4K window (5952x3876) makes the picture ~2.4% too tall.
+  * The exact 3:2 window (5952x3968, first-row register < 256) has NEVER been run on
+    an A6700 - expect possible black frame / restart (battery pull clears it).
+  * In-camera playback of 3840x2560 needs a separate playback-fix step.
+  * Whether the power switch (not a battery pull) clears the patch is unknown.
+  * Required mode is Mass Storage, then service mode - NOT PC Remote (0x0E78).
 """
 from __future__ import annotations
 
@@ -49,32 +63,36 @@ try:
 except ImportError:
     sys.exit("[ERROR] pyusb missing: pip install pyusb")
 
+FIRMWARE = "2.00"
+MODEL = "ILCE-6700"
 SONY_VID = 0x054C
 A6700_MSC_PID = 0x0E76            # A6700 in USB Mass Storage mode
+SONY_SERVICE_PID = 0x0336        # re-enumerated device once in service mode
 USB_CLASS_MSC = 0x08             # USB Mass Storage interface class
 
-# Stock encoder height word (movz #0x870 = 2160) and the Open Gate value
-# (#0xa00 = 2560); the width store is #0xf00 = 3840. The RAM site is resolved by
-# signature scan, never stored as firmware bytes.
-STOCK_HEIGHT = 0x0870
-OPENGATE_HEIGHT = 0x0A00
-OPENGATE_WIDTH = 0x0F00
+# Open Gate dimensions (plain integers, not firmware bytes).
+STOCK_HEIGHT = 0x0870            # 2160
+OPENGATE_HEIGHT = 0x0A00         # 2560
+OPENGATE_WIDTH = 0x0F00          # 3840
 
-# ARM64 MOVZ (wide immediate), LSL #0. Encoding: sf 10 100101 hw imm16 Rd, with
-# imm16 in bits [20:5] and Rd in [4:0]. The 32-bit base opcode is 0x52800000.
-# MOVZ_MASK ignores the sf bit (W vs X register), hw, Rd and imm16, so we can
-# match "movz <w|x>reg, #imm, lsl #0" for any destination register.
+# Verified A6700 2.00 address map (public addresses from the port notes; these are
+# offsets, not Sony firmware content). The height word the encoder feeds the movie
+# writer lives in libmpr.so; av-cam.bin carries the decode/playback side.
+A6700_200_SITES = {
+    "libmpr_mp4_height_a":    0x1EC1B8,   # MP4 header height word (libmpr.so)
+    "libmpr_mp4_height_b":    0x1EC2E8,   # second MP4 header height word
+    "libmpr_res_compare":     0x15E4E4,   # playback resolution compare
+    "avcam_decode_size_table": 0xC00350,  # decode size table (av-cam.bin)
+    "movie_size_table":       0x199EC7C,  # movie size table (output size word)
+}
+# Sites whose 16-bit height word should read STOCK_HEIGHT before a patch.
+HEIGHT_SITES = ("libmpr_mp4_height_a", "libmpr_mp4_height_b")
+
+# ARM64 MOVZ (wide immediate), LSL #0: sf 10 100101 hw imm16 Rd, imm16 in bits
+# [20:5], Rd [4:0]; 32-bit base opcode 0x52800000. MOVZ_MASK ignores sf (W/X), hw,
+# Rd and imm16, so it matches "movz <w|x>reg, #imm, lsl #0" for any register.
 MOVZ_LSL0_BASE = 0x52800000
 MOVZ_MASK = 0x7FE00000
-
-# --- Sony vendor memory CDBs (CONFIRM ON HARDWARE from the open updater proto) ---
-# Not shipped with working opcodes on purpose: fill these from the open-source
-# transport before use. Left None so the tool refuses rather than guesses.
-# Each is a callable that builds the raw SCSI CDB from an address + length, e.g.
-#   VENDOR_MEM_READ_CDB  = lambda addr, length: bytes([0xC0]) + struct.pack(">II", addr, length)
-#   VENDOR_MEM_WRITE_CDB = lambda addr, length: bytes([0xC1]) + struct.pack(">II", addr, length)
-VENDOR_MEM_READ_CDB = None        # lambda addr, length: <cdb bytes>
-VENDOR_MEM_WRITE_CDB = None       # lambda addr, length: <cdb bytes>
 
 
 class MscError(RuntimeError):
@@ -86,8 +104,25 @@ def _is_movz_imm(word: int, imm16: int) -> bool:
     return (word & MOVZ_MASK) == MOVZ_LSL0_BASE and ((word >> 5) & 0xFFFF) == imm16
 
 
-class MscDevice:
-    """Minimal USB Mass Storage Bulk-Only Transport (original implementation)."""
+class CameraMemory:
+    """Abstract RAM read/write transport. The MIT build ships no working transport
+    (the vetted on-camera helper is GPL / firmware-derived). Wire a subclass that
+    drives the Sony service-mode helper, or your own, to go live."""
+
+    def mem_read(self, addr, length):
+        raise MscError(
+            "no CameraMemory transport configured. RAM read/write on BIONZ XR runs "
+            "through an on-camera service-mode helper, which this MIT build does not "
+            "ship. Run the ArcaneLantern GPL kit for the vetted patch, or wire a "
+            "transport (see the module docstring).")
+
+    def mem_write(self, addr, data):
+        self.mem_read(addr, 0)   # raises the same clean message
+
+
+class MscDevice(CameraMemory):
+    """Minimal USB Mass Storage Bulk-Only Transport (original implementation), used
+    for the read-only SCSI probe and for service-mode entry."""
 
     def __init__(self, dev, ep_in, ep_out):
         self.dev, self.ep_in, self.ep_out = dev, ep_in, ep_out
@@ -95,7 +130,6 @@ class MscDevice:
 
     @classmethod
     def open(cls, pid=A6700_MSC_PID):
-        # Prefer the libusb-package backend on Windows (same as probe_a6700.py).
         try:
             import libusb_package
             backend = libusb_package.get_libusb1_backend()
@@ -138,19 +172,9 @@ class MscDevice:
             raise MscError("bad CSW")
         return csw[12]  # status byte (0 = ok)
 
-    def command(self, cdb, data_len=0, direction_in=True):
-        self._cbw(cdb, data_len, direction_in)
-        data = b""
-        if data_len and direction_in:
-            data = bytes(self.ep_in.read(data_len, 6000))
-        status = self._csw()
-        if status != 0:
-            raise MscError(f"CSW status {status}")
-        return data
-
     def scsi_try(self, cdb, data_len=0):
-        """Issue one read-only SCSI command, returning (status, data) WITHOUT
-        raising on a non-zero SCSI status (for the probe). status None = no reply."""
+        """One read-only SCSI command -> (status, data), no raise on non-zero
+        status. status None = no reply."""
         try:
             self._cbw(cdb, data_len, True)
             data = b""
@@ -163,7 +187,6 @@ class MscDevice:
         except (usb.core.USBError, MscError):
             return None, b""
 
-    # --- standard, safe SCSI probes (read-only) ---
     def inquiry(self):
         return self.scsi_try(bytes([0x12, 0, 0, 0, 36, 0]), 36)
 
@@ -173,70 +196,86 @@ class MscDevice:
     def read_capacity10(self):
         return self.scsi_try(bytes([0x25, 0, 0, 0, 0, 0, 0, 0, 0, 0]), 8)
 
-    # --- vendor memory access (needs the CDBs above) ---
-    def mem_read(self, addr, length):
-        if VENDOR_MEM_READ_CDB is None:
-            raise MscError("VENDOR_MEM_READ_CDB not configured (see file header).")
-        cdb = VENDOR_MEM_READ_CDB(addr, length)
-        return self.command(cdb, length, direction_in=True)
-
-    def mem_write(self, addr, data):
-        if VENDOR_MEM_WRITE_CDB is None:
-            raise MscError("VENDOR_MEM_WRITE_CDB not configured (see file header).")
-        cdb = VENDOR_MEM_WRITE_CDB(addr, len(data))
-        self._cbw(cdb, len(data), False)
-        self.ep_out.write(data, 6000)
-        if self._csw() != 0:
-            raise MscError("write CSW error")
-
     def close(self):
         usb.util.dispose_resources(self.dev)
 
 
-def find_libmpr_height_site(dev, scan_start=None, scan_size=None,
+def find_libmpr_height_site(mem, scan_start=None, scan_size=None,
                             chunk=0x10000, window_bytes=256):
-    """Locate the movie-encoder height word in RAM by signature scan.
-
-    Walks the mapped libmpr region in chunks (with a small overlap window) and
-    looks for the ARM64 'movz <reg>, #0x870' (height 2160) instruction that sits
-    within `window_bytes` of a 'movz <reg>, #0xf00' (width 3840) store - the
-    geometry pair the encoder loads together. Returns the address of the height
-    word, or None if not found.
-
-    No proprietary Sony firmware bytes are embedded: only the public ARM64 MOVZ
-    opcode encoding and the two plain integers 2160 and 3840 are used. The scan
-    range (the libmpr mapped base + size) must be supplied once resolved on
-    hardware; without it the function refuses rather than guess."""
+    """Locate the movie-encoder height word by signature scan over a RAM region
+    reachable through `mem` (a CameraMemory). Matches ARM64 'movz <reg>, #0x870'
+    (height 2160) within `window_bytes` of a 'movz <reg>, #0xf00' (width 3840).
+    Returns the height word's address, or None. No firmware bytes embedded: only the
+    public MOVZ encoding and the integers 2160 / 3840. Needs the scan range (libmpr
+    mapped base + length), resolved on hardware; refuses otherwise."""
     if scan_start is None or scan_size is None:
         raise MscError(
             "scan range required: pass --scan-start and --scan-size (the libmpr "
             "mapped base and length, resolved from the loader map on hardware).")
-
-    addr = scan_start
-    end = scan_start + scan_size
-    tail = b""
-    tail_addr = scan_start
+    addr, end = scan_start, scan_start + scan_size
+    tail, tail_addr = b"", scan_start
     while addr < end:
         n = min(chunk, end - addr)
-        buf = dev.mem_read(addr, n)          # read-only
-        region = tail + bytes(buf)
+        region = tail + bytes(mem.mem_read(addr, n))
         base = tail_addr
         limit = len(region) - 3
         for off in range(0, limit, 4):
             word = int.from_bytes(region[off:off + 4], "little")
             if not _is_movz_imm(word, STOCK_HEIGHT):
                 continue
-            lo = max(0, off - window_bytes)
-            hi = min(limit, off + window_bytes)
+            lo, hi = max(0, off - window_bytes), min(limit, off + window_bytes)
             for o2 in range(lo, hi, 4):
-                w2 = int.from_bytes(region[o2:o2 + 4], "little")
-                if _is_movz_imm(w2, OPENGATE_WIDTH):
+                if _is_movz_imm(int.from_bytes(region[o2:o2 + 4], "little"),
+                                OPENGATE_WIDTH):
                     return base + off
-        keep = min(window_bytes, len(region)) & ~0x3   # stay 4-byte aligned
+        keep = min(window_bytes, len(region)) & ~0x3
         tail = region[len(region) - keep:] if keep else b""
         tail_addr = base + len(region) - keep
         addr += n
     return None
+
+
+def read_height(mem, addr):
+    """Read one 16-bit height word (little-endian)."""
+    return struct.unpack("<H", bytes(mem.mem_read(addr, 2)))[0]
+
+
+def label_height(v):
+    return ("stock 2160" if v == STOCK_HEIGHT else
+            "open-gate 2560" if v == OPENGATE_HEIGHT else "UNEXPECTED")
+
+
+def verify_sites(mem, base=0):
+    """Read every known libmpr height site and report. `base` is the libmpr mapped
+    base (file offsets in A6700_200_SITES are added to it). Returns list of
+    (name, addr, value, label). Read-only."""
+    out = []
+    for name in HEIGHT_SITES:
+        addr = base + A6700_200_SITES[name]
+        v = read_height(mem, addr)
+        out.append((name, addr, v, label_height(v)))
+    return out
+
+
+def patch_sites(mem, base, value, expect=None):
+    """Write `value` to every known height site, after checking each holds `expect`
+    (abort the whole patch if any mismatches). Returns a backup dict {addr: old}."""
+    targets = [base + A6700_200_SITES[n] for n in HEIGHT_SITES]
+    if expect is not None:
+        for addr in targets:
+            cur = read_height(mem, addr)
+            if cur != expect:
+                raise MscError(
+                    f"site 0x{addr:x} holds 0x{cur:04X}, expected 0x{expect:04X} "
+                    "(wrong firmware / already patched) - nothing written.")
+    backup = {}
+    for addr in targets:
+        backup[addr] = read_height(mem, addr)
+        mem.mem_write(addr, struct.pack("<H", value))
+        chk = read_height(mem, addr)
+        if chk != value:
+            raise MscError(f"readback mismatch at 0x{addr:x}: 0x{chk:04X}")
+    return backup
 
 
 def probe_msc(dev):
@@ -247,63 +286,79 @@ def probe_msc(dev):
         vendor = data[8:16].decode("ascii", "replace").strip()
         product = data[16:32].decode("ascii", "replace").strip()
         rev = data[32:36].decode("ascii", "replace").strip()
-        pdt = data[0] & 0x1F
         print(f"[probe ] INQUIRY ok: vendor={vendor!r} product={product!r} "
-              f"rev={rev!r} device-type=0x{pdt:02X}")
+              f"rev={rev!r} device-type=0x{data[0] & 0x1F:02X}")
     else:
         print(f"[probe ] INQUIRY no/!=0 status ({st}); BOT framing may differ.")
-
     st2, _ = dev.test_unit_ready()
     print("[probe ] TEST UNIT READY -> "
           + ("ready (status 0)" if st2 == 0
              else f"status {st2} (not ready / no medium - normal for a camera)"))
-
     st3, cap = dev.read_capacity10()
     if st3 == 0 and len(cap) >= 8:
         last_lba, blk = struct.unpack(">II", cap[:8])
-        total = (last_lba + 1) * blk
         print(f"[probe ] READ CAPACITY: {last_lba + 1} blocks x {blk} B "
-              f"(~{total / (1024 ** 2):.1f} MiB logical).")
+              f"(~{(last_lba + 1) * blk / (1024 ** 2):.1f} MiB logical).")
     else:
         print(f"[probe ] READ CAPACITY no/!=0 status ({st3}).")
-
     responded = (st is not None) or (st2 is not None) or (st3 is not None)
     print("[probe ] result: standard SCSI BOT framing "
-          + ("RESPONDS on this BIONZ XR body." if responded
-             else "did NOT respond (unexpected)."))
-    print("[probe ] (no vendor memory CDB was sent; configure those separately.)")
+          + ("RESPONDS on this BIONZ XR body." if responded else "did NOT respond."))
+    print("[probe ] (no vendor/service memory access was attempted.)")
     return responded
+
+
+def print_info():
+    print(f"=== ram_opengate: verified facts ({MODEL} fw {FIRMWARE}) ===")
+    print(f"  Open Gate: 3840x2160 (0x{STOCK_HEIGHT:04X}) -> 3840x2560 "
+          f"(0x{OPENGATE_HEIGHT:04X}); width 3840 (0x{OPENGATE_WIDTH:04X}).")
+    print("  Required USB mode: Mass Storage (PID 0x0E76) -> service mode "
+          f"(PID 0x{SONY_SERVICE_PID:04X}).  NOT PC Remote (0x0E78).")
+    print("  Known 2.00 sites (file offsets):")
+    for name, off in A6700_200_SITES.items():
+        print(f"    {name:24s} 0x{off:07X}")
+    print("  Mechanism: on-camera service-mode helper does the RAM read/write; this")
+    print("    MIT build ships no helper (vetted builds are GPL / firmware-derived).")
+    print("  Caveats: contributed 4K window ~2.4% too tall; exact 3:2 window UNTESTED")
+    print("    on A6700; in-camera 3840x2560 playback needs a separate fix; RAM only")
+    print("    (cold boot / battery-out ~10 s reverts).")
+    print("  First command on hardware (read-only):")
+    print("    python ram_opengate.py --probe-msc")
 
 
 def main():
     ap = argparse.ArgumentParser(
-        description="Volatile RAM Open Gate research helper (A6700). PTP aspect "
-                    "ratio is blocked by the HAITA app layer; this targets the "
-                    "downstream encoder height word in RAM only.")
+        description=f"Volatile RAM Open Gate 3:2 research helper ({MODEL} fw "
+                    f"{FIRMWARE}). PTP aspect ratio is blocked by HAITA; the real "
+                    "patch runs through an on-camera service-mode helper (not shipped "
+                    "in this MIT build).")
     mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--verify-only", action="store_true", default=True,
-                      help="(default) read-only: locate + verify stock bytes, write nothing.")
+    mode.add_argument("--info", action="store_true",
+                      help="no camera: print verified facts and the first command.")
     mode.add_argument("--probe-msc", action="store_true",
-                      help="read-only: send safe INQUIRY/TEST UNIT READY/READ CAPACITY "
-                           "and report whether SCSI BOT framing responds.")
+                      help="read-only SCSI probe (INQUIRY/TUR/READ CAPACITY).")
+    mode.add_argument("--verify-only", action="store_true", default=True,
+                      help="(default) read-only: locate + verify stock bytes.")
     mode.add_argument("--confirm-ram-write", action="store_true",
                       help="opt-in: apply the volatile RAM patch (gone at power-off).")
     mode.add_argument("--restore", action="store_true",
-                      help="write the stock/backed-up bytes back (no reboot).")
+                      help="write the stock height word back (no reboot).")
     ap.add_argument("--pid", type=lambda x: int(x, 0), default=A6700_MSC_PID)
+    ap.add_argument("--libmpr-base", type=lambda x: int(x, 0), default=0,
+                    help="libmpr mapped base; site offsets are added to it.")
     ap.add_argument("--scan-start", type=lambda x: int(x, 0), default=None,
-                    help="libmpr mapped base address for the signature scan.")
+                    help="libmpr mapped base for the fallback signature scan.")
     ap.add_argument("--scan-size", type=lambda x: int(x, 0), default=None,
                     help="length in bytes to scan from --scan-start.")
     args = ap.parse_args()
 
+    if args.info:
+        print_info()
+        return
+
     writing = args.confirm_ram_write or args.restore
-    if args.probe_msc:
-        head = "MSC PROBE (read-only)"
-    elif writing:
-        head = "RAM WRITE"
-    else:
-        head = "VERIFY-ONLY (read)"
+    head = ("MSC PROBE (read-only)" if args.probe_msc else
+            "RAM WRITE" if writing else "VERIFY-ONLY (read)")
     print(f"=== ram_opengate: {head} ===")
 
     try:
@@ -316,28 +371,21 @@ def main():
             probe_msc(dev)
             return
 
-        site = find_libmpr_height_site(dev, args.scan_start, args.scan_size)
-        if site is None:
-            sys.exit("[ERROR] height/width signature not found in the scan range.")
-        cur = struct.unpack("<H", dev.mem_read(site, 2))[0]
-        label = ("stock 2160" if cur == STOCK_HEIGHT else
-                 "patched 2560" if cur == OPENGATE_HEIGHT else "?")
-        print(f"[+] height word @0x{site:x} = 0x{cur:04X} ({label})")
-
+        # RAM read/write needs a CameraMemory transport (the on-camera service
+        # helper). MscDevice has none in this MIT build, so these ops report the
+        # clean "no transport" message instead of guessing - strictly safe.
         if args.restore:
-            dev.mem_write(site, struct.pack("<H", STOCK_HEIGHT))
-            print("[+] restored stock 0x0870 (2160).")
+            patch_sites(dev, args.libmpr_base, STOCK_HEIGHT)
+            print("[+] restored stock height 0x0870 (2160) at all sites.")
         elif args.confirm_ram_write:
-            print(f"[backup] 0x{site:x} = 0x{cur:04X}")   # pre-patch backup
-            dev.mem_write(site, struct.pack("<H", OPENGATE_HEIGHT))
-            chk = struct.unpack("<H", dev.mem_read(site, 2))[0]   # readback verify
-            print(f"[+] wrote 0x0A00 (2560); readback 0x{chk:04X} "
-                  + ("OK (volatile, gone at power-off)" if chk == OPENGATE_HEIGHT
-                     else "MISMATCH - consider --restore"))
+            backup = patch_sites(dev, args.libmpr_base, OPENGATE_HEIGHT,
+                                 expect=STOCK_HEIGHT)
+            print("[+] wrote 0x0A00 (2560); readback OK (volatile, gone at power-off).")
+            print("[backup] " + ", ".join(f"0x{a:x}=0x{v:04X}"
+                                           for a, v in backup.items()))
         else:
-            ok = (cur == STOCK_HEIGHT)
-            print("[verify] " + ("OK: stock bytes present, nothing written."
-                                  if ok else "unexpected value; no write (read-only)."))
+            for name, addr, v, lab in verify_sites(dev, args.libmpr_base):
+                print(f"[verify] {name} @0x{addr:x} = 0x{v:04X} ({lab})")
     except MscError as e:
         sys.exit(f"[ERROR] {e}")
     finally:

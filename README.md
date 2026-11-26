@@ -515,29 +515,54 @@ ffmpeg -i input.mp4 -map 0:v:0 -map 0:a? -c copy -movflags +faststart output.mp4
 
 ---
 
-## 🧬 Volatile RAM Open Gate (research, `ram_opengate.py`)
+## 🧬 Volatile RAM Open Gate 3:2 (research, `ram_opengate.py`)
 
-Separate from the PC-Remote tools. Uses the **USB Mass Storage** service channel
-(SCSI vendor commands, open Sony-updater / PMCA-RE style) — **A6700 MSC `PID 0x0E76`**.
-All effects are RAM-only: **gone on power-off / battery pull**.
+Target: **ILCE-6700 firmware 2.00**, 3840×2160 → **3840×2560** in RAM only
+(**gone on power-off / battery pull**). Open Gate is blocked at the app layer
+(HAITA, `REC_MOVIE_ASPECT_RATIO_NOT_16_9` in `appFw.so`); this targets the downstream
+encoder height word.
 
-> **Switch the camera USB mode to _Mass Storage_** (not PC Remote) for this tool.
+**How it really works (BIONZ XR).** Not a host-side memory poke. The verified pipeline
+(as used by the [ArcaneLantern](https://github.com/ArcaneLantern/a6700-open-gate-test)
+GPL kit — *referenced, never copied*) is: **Mass Storage** (`PID 0x0E76`) → Sony
+**service mode** (re-enumerates `PID 0x0336`, via MIT [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE))
+→ a small **on-camera ARM64 helper** is uploaded, run once, and *it* reads/writes the
+camera's RAM, leaving a result file on the RAM disk.
+
+> **This MIT build ships no on-camera helper** (a correct one embeds Sony
+> firmware-derived tables; the vetted builds are GPL). So `ram_opengate.py` provides
+> the MIT-clean **host side**: the verified 2.00 address map + dimensions, a read-only
+> SCSI probe, an ARM64 signature scanner, and the verify/patch/restore logic driven
+> through a pluggable `CameraMemory` transport. RAM read/write **refuses until a
+> transport is wired** — it never guesses.
 
 ```bash
-# Read-only (default): find libmpr.so in RAM, verify stock 3840x2160 bytes
+# No camera: print the verified 2.00 facts + the first command to run
+python ram_opengate.py --info
+
+# Read-only SCSI probe (switch the camera USB mode to Mass Storage first)
+python ram_opengate.py --probe-msc
+
+# Read-only (default): read + verify the encoder height sites
 python ram_opengate.py --verify-only
 
-# Opt-in volatile patch (#0x870  2160 -> #0xa00 2560), backs up first
+# Opt-in volatile patch (0x0870 2160 -> 0x0A00 2560): checks stock first,
+# backs up, writes, reads back. Needs a wired CameraMemory transport.
 python ram_opengate.py --confirm-ram-write
 
 # Revert in RAM without rebooting
 python ram_opengate.py --restore
 ```
 
-> ⚠️ **Research.** `ram_opengate.py` ships original MIT code only; the Sony vendor
-> memory CDBs are left as marked constants to confirm on hardware (no firmware bytes,
-> no GPL code). `--verify-only` writes nothing. Open Gate is gated at the app layer
-> (HAITA); this targets the downstream encoder word in RAM. Use at your own risk.
+> ⚠️ **Unverified caveats (A6700 2.00).** The contributed 4K window makes the picture
+> **~2.4 % too tall**; the **exact 3:2 window has never been run on an A6700** (expect a
+> possible black frame / restart — a battery pull clears it); in-camera 3840×2560
+> playback needs a separate fix. MIT code only, zero firmware bytes, zero flash writes.
+
+**In the field (no laptop).** Once verified on PC, the volatile patch can run from a
+phone over **USB-C OTG** (Android + Termux + `pyusb`/PMCA-RE for the host side). The
+on-camera helper step still applies — the ArcaneLantern kit ships an Android APK that
+performs it; this MIT tool covers the read-only probe/verify on the same phone.
 
 ---
 
