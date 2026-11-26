@@ -18,6 +18,24 @@ descriptors. No write, setting, or trigger command is issued.
 
 ---
 
+## ✅ Current verified state (Sony A6700 v2.00)
+
+Proven **live on real hardware** (firmware 2.00, PC Remote `PID 0x0E78`):
+
+- **USB telemetry:** session handshake OK; **61 vendor `0x92xx` opcodes** enumerated;
+  `GetAllExtDevicePropInfo (0x9209)` ~8019 B (122 active props).
+- **Capture control:** `ControlDevice (0x9207)` S1 `0xD2C1` / S2 `0xD2C2` / movie-rec
+  `0xD2C8` all return `OK`.
+- **Image retrieval:** full-res frame pulled from `0xFFFFC001` (**~31.2 MB RAW**), JPEG
+  or `.ARW`, via `GetObjectInfo` + `GetObject`.
+- **Multi-exposure:** `multi_exposure.py` live capture + blend (`average`/`lighten`/
+  `screen`) working end-to-end.
+- **Open Gate (research):** sensor + encoder tables for **3840×2560** statically
+  mapped; the 3:2 menu switch is blocked at the app layer (HAITA) — see
+  [`docs/RESULTS.md`](docs/RESULTS.en.md). RAM-only path is research, not shipped.
+
+---
+
 ## 🎯 Project scope
 
 The research is **strictly limited to two goals**, with **no permanent modification**
@@ -414,6 +432,34 @@ off the SD card. Requires Pillow + numpy (`pip install pillow numpy`).
 
 ---
 
+## 📱 Mobile RAM-only loading (no PC, on the go)
+
+The session is **volatile** (gone at power-off), so loading it in the field is the
+goal. Planned/experimental paths — **plug in ~2 s, unplug, shoot until power-off**:
+
+- **Android (USB-C OTG):** run the Python tool via Termux, or a WebUSB page in
+  Chrome — no app store needed.
+- **iPhone (USB-C, 15/16):** a small companion app (built via GitHub Actions /
+  sideload) drives the same USB sequence.
+- **Pocket dongle (ESP32-S3 USB-C):** a stand-alone stick that replays the session
+  when plugged — fully PC-free.
+
+> These are on the roadmap; the desktop CLI is the reference today. See
+> [`docs/ROADMAP.md`](docs/ROADMAP.en.md).
+
+---
+
+## 🎬 Post-processing (DaVinci Resolve / players)
+
+Open Gate 3:2 clips may need a lossless container fix for some editors/players — no
+re-encode, just remux:
+
+```bash
+ffmpeg -i input.mp4 -map 0:v:0 -map 0:a? -c copy -movflags +faststart output.mp4
+```
+
+---
+
 ## 💬 Community & ideas
 
 Ideas for features or for cameras to support are very welcome:
@@ -463,6 +509,22 @@ A6700-Remote-Tools/
 │   └── DEVICE_PROPERTIES.en.md / .md             # 386-code table (EN / FR)
 └── README.md / README.fr.md                      # this file (EN / FR)
 ```
+
+## 🖼️ Media & samples
+
+- **Before / after:** _(screenshots coming soon)_
+- **Sample files:** _(Google Drive link — TBA)_
+- **Community Discord:** _(badge / invite — TBA)_
+
+---
+
+## 🙏 Acknowledgements
+
+**Claude Code (Anthropic)** strongly assisted in the research, reverse-engineering
+analysis, and development of this project — firmware static analysis, PTP/SDIO
+protocol mapping, and the Python tooling.
+
+---
 
 ## License
 

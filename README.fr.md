@@ -20,6 +20,24 @@ déclenchement n'est émise.
 
 ---
 
+## ✅ État vérifié actuel (Sony A6700 v2.00)
+
+Prouvé **en direct sur boîtier réel** (firmware 2.00, PC Remote `PID 0x0E78`) :
+
+- **Télémétrie USB :** handshake OK ; **61 opcodes vendor `0x92xx`** énumérés ;
+  `GetAllExtDevicePropInfo (0x9209)` ~8019 o (122 propriétés actives).
+- **Contrôle capture :** `ControlDevice (0x9207)` S1 `0xD2C1` / S2 `0xD2C2` / movie-rec
+  `0xD2C8` renvoient tous `OK`.
+- **Récupération image :** vue pleine résolution lue sur `0xFFFFC001` (**~31,2 Mo RAW**),
+  JPEG ou `.ARW`, via `GetObjectInfo` + `GetObject`.
+- **Multi-exposition :** `multi_exposure.py` capture + fusion (`average`/`lighten`/
+  `screen`) fonctionnel de bout en bout.
+- **Open Gate (recherche) :** tables capteur + encodeur pour **3840×2560** cartographiées
+  en statique ; la bascule menu 3:2 est bloquée au niveau applicatif (HAITA) — voir
+  [`docs/RESULTS.md`](docs/RESULTS.md). Voie RAM-only = recherche, non livrée.
+
+---
+
 ## 🎯 Périmètre du projet
 
 La recherche est **strictement limitée à deux objectifs**, et **sans aucune
@@ -428,6 +446,35 @@ ex. des vues copiées de la carte SD. Nécessite Pillow + numpy (`pip install pi
 
 ---
 
+## 📱 Chargement RAM-only mobile (sans PC, en déplacement)
+
+La session est **volatile** (perdue à l'extinction) ; la charger sur le terrain est le
+but. Voies prévues/expérimentales — **brancher ~2 s, débrancher, filmer jusqu'à
+l'extinction** :
+
+- **Android (USB-C OTG) :** l'outil Python via Termux, ou une page WebUSB dans
+  Chrome — sans app store.
+- **iPhone (USB-C, 15/16) :** une petite app compagnon (compilée via GitHub Actions /
+  sideload) joue la même séquence USB.
+- **Dongle de poche (ESP32-S3 USB-C) :** une clé autonome qui rejoue la session au
+  branchement — 100 % sans PC.
+
+> Ces voies sont sur la feuille de route ; la CLI bureau est la référence aujourd'hui.
+> Voir [`docs/ROADMAP.md`](docs/ROADMAP.md).
+
+---
+
+## 🎬 Post-traitement (DaVinci Resolve / lecteurs)
+
+Les clips Open Gate 3:2 peuvent nécessiter une correction de conteneur sans perte pour
+certains éditeurs/lecteurs — sans réencodage, simple remux :
+
+```bash
+ffmpeg -i input.mp4 -map 0:v:0 -map 0:a? -c copy -movflags +faststart output.mp4
+```
+
+---
+
 ## 💬 Communauté & idées
 
 Les idées de fonctionnalités ou de boîtiers à prendre en charge sont les bienvenues :
@@ -477,6 +524,22 @@ A6700-Remote-Tools/
 │   └── DEVICE_PROPERTIES.md / .en.md             # table des 386 codes (FR / EN)
 └── README.md / README.fr.md                      # ce fichier (EN / FR)
 ```
+
+## 🖼️ Médias & échantillons
+
+- **Avant / après :** _(captures à venir)_
+- **Fichiers d'exemple :** _(lien Google Drive — à venir)_
+- **Discord communautaire :** _(badge / invitation — à venir)_
+
+---
+
+## 🙏 Remerciements
+
+**Claude Code (Anthropic)** a fortement contribué à la recherche, à l'analyse de
+rétro-ingénierie et au développement de ce projet — analyse statique du firmware,
+cartographie du protocole PTP/SDIO et outillage Python.
+
+---
 
 ## Licence
 
