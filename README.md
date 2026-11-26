@@ -465,6 +465,32 @@ ffmpeg -i input.mp4 -map 0:v:0 -map 0:a? -c copy -movflags +faststart output.mp4
 
 ---
 
+## 🧬 Volatile RAM Open Gate (research, `ram_opengate.py`)
+
+Separate from the PC-Remote tools. Uses the **USB Mass Storage** service channel
+(SCSI vendor commands, open Sony-updater / PMCA-RE style) — **A6700 MSC `PID 0x0E76`**.
+All effects are RAM-only: **gone on power-off / battery pull**.
+
+> **Switch the camera USB mode to _Mass Storage_** (not PC Remote) for this tool.
+
+```bash
+# Read-only (default): find libmpr.so in RAM, verify stock 3840x2160 bytes
+python ram_opengate.py --verify-only
+
+# Opt-in volatile patch (#0x870  2160 -> #0xa00 2560), backs up first
+python ram_opengate.py --confirm-ram-write
+
+# Revert in RAM without rebooting
+python ram_opengate.py --restore
+```
+
+> ⚠️ **Research.** `ram_opengate.py` ships original MIT code only; the Sony vendor
+> memory CDBs are left as marked constants to confirm on hardware (no firmware bytes,
+> no GPL code). `--verify-only` writes nothing. Open Gate is gated at the app layer
+> (HAITA); this targets the downstream encoder word in RAM. Use at your own risk.
+
+---
+
 ## 💬 Community & ideas
 
 Ideas for features or for cameras to support are very welcome:
@@ -505,6 +531,7 @@ A6700-Remote-Tools/
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking
+├── ram_opengate.py      # volatile RAM Open Gate helper (Mass Storage, research)
 ├── sony_codes.py        # generated PTP code dictionaries (protocol constants)
 ├── requirements.txt   # Python dependencies (pyusb; pillow/numpy optional)
 ├── .gitignore         # strict exclusion of firmware binaries

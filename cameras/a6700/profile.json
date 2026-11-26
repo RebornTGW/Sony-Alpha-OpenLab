@@ -8,6 +8,7 @@
   "usb": {
     "vid": "0x054C",
     "pid_pc_remote": "0x0E78",
+    "pid_mass_storage": "0x0E76",
     "interface_class": "0x06",
     "connection_mode": "PC Remote"
   },
