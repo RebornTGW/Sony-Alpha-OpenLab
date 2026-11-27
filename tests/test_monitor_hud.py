@@ -10,6 +10,7 @@ Run from the repo root:  python -m unittest -v tests.test_monitor_hud
 import os
 import sys
 import unittest
+from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -221,6 +222,225 @@ class TestSyntheticDemoFrame(unittest.TestCase):
         f0 = hud.synthetic_demo_frame(width=64, height=42, t=0.0)
         f1 = hud.synthetic_demo_frame(width=64, height=42, t=5.0)
         self.assertFalse(np.array_equal(f0, f1))
+
+
+class TestCropBoxesOnA16x9Source(unittest.TestCase):
+    """Regression: on a 16:9 source (e.g. a 720p/1080p webcam), the 3:2 guide
+    used to just be "the whole frame" - identical to the 16:9 window border,
+    so it was never visually distinct. crop_box_3x2() now computes a real
+    pillarboxed 3:2 crop on a wider-than-3:2 source instead."""
+
+    def test_3x2_pillarboxes_on_a_1920x1080_source(self):
+        x, y, w, h = hud.crop_box_3x2(1920, 1080)
+        self.assertEqual((w, h), (1620, 1080))  # 1080 * 3/2 = 1620
+        self.assertEqual(y, 0)  # full height kept
+        self.assertEqual(x, (1920 - 1620) // 2)
+        self.assertLess(w, 1920, "3:2 box must be narrower than the 16:9 frame")
+
+    def test_3x2_pillarboxes_on_a_1280x720_source(self):
+        x, y, w, h = hud.crop_box_3x2(1280, 720)
+        self.assertEqual((w, h), (1080, 720))  # 720 * 3/2 = 1080
+        self.assertEqual(y, 0)
+        self.assertEqual(x, (1280 - 1080) // 2)
+
+    def test_16x9_is_the_untouched_full_frame_on_a_16x9_source(self):
+        # The 16:9 guide on an already-16:9 source should NOT crop anything.
+        self.assertEqual(hud.crop_box_16x9(1920, 1080), (0, 0, 1920, 1080))
+
+    def test_9x16_still_pillarboxes_on_a_16x9_source(self):
+        x, y, w, h = hud.crop_box_9x16(1920, 1080)
+        self.assertEqual(y, 0)
+        self.assertLess(w, 1920)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestDimOutsideBox(unittest.TestCase):
+    """_dim_outside_box() is the "3:2 dim overlay rendering" the OSD guides
+    use - pure numpy, no cv2, so it's testable without OpenCV installed."""
+
+    def test_dims_letterbox_bars_top_and_bottom_only(self):
+        frame = np.full((100, 100, 3), 200, dtype=np.uint8)
+        box = (0, 20, 100, 60)  # full width, vertical letterbox
+        hud._dim_outside_box(frame, box, opacity=0.4)
+        self.assertTrue(np.all(frame[0:20] == round(200 * 0.6)))   # top bar dimmed
+        self.assertTrue(np.all(frame[80:100] == round(200 * 0.6)))  # bottom bar dimmed
+        self.assertTrue(np.all(frame[20:80] == 200))  # inside the box, untouched
+
+    def test_dims_pillarbox_bars_left_and_right_only(self):
+        frame = np.full((100, 100, 3), 200, dtype=np.uint8)
+        box = (20, 0, 60, 100)  # full height, horizontal pillarbox
+        hud._dim_outside_box(frame, box, opacity=0.4)
+        self.assertTrue(np.all(frame[:, 0:20] == round(200 * 0.6)))
+        self.assertTrue(np.all(frame[:, 80:100] == round(200 * 0.6)))
+        self.assertTrue(np.all(frame[:, 20:80] == 200))
+
+    def test_full_frame_box_dims_nothing(self):
+        # e.g. a "3:2" guide on an already-3:2 source: the box IS the frame.
+        frame = np.full((50, 50, 3), 128, dtype=np.uint8)
+        hud._dim_outside_box(frame, (0, 0, 50, 50), opacity=0.4)
+        self.assertTrue(np.all(frame == 128))
+
+    def test_opacity_controls_dim_strength(self):
+        frame = np.full((10, 10, 3), 255, dtype=np.uint8)
+        hud._dim_outside_box(frame, (0, 2, 10, 6), opacity=0.5)
+        self.assertTrue(np.all(frame[0:2] == 127))  # round(255 * 0.5)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestRunModeCommand(unittest.TestCase):
+    """run_mode_command() must never raise - it's the dispatcher behind [1]/[2]
+    in the live preview loop, and a raised exception there used to crash the
+    whole OpenCV window (reproduced before this fix: pressing [2] live without
+    a prior confirm raised PermissionError straight out of the old
+    _run_mode_command(), killing monitor_hud())."""
+
+    def test_demo_success_returns_true(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            ok = hud.run_mode_command("opengate-rs.exe", hud.MODE_OPEN_GATE, demo=True)
+        self.assertTrue(ok)
+        run.assert_called_once()
+
+    def test_live_stock_returns_true_without_running_anything(self):
+        with mock.patch("subprocess.run") as run:
+            ok = hud.run_mode_command("opengate-rs.exe", hud.MODE_STOCK, demo=False)
+        self.assertTrue(ok)
+        run.assert_not_called()
+
+    def test_live_open_gate_without_confirm_returns_false_not_an_exception(self):
+        with mock.patch("subprocess.run") as run:
+            ok = hud.run_mode_command("opengate-rs.exe", hud.MODE_OPEN_GATE, demo=False, confirm=False)
+        self.assertFalse(ok)
+        run.assert_not_called()
+
+    def test_missing_exe_returns_false_not_an_exception(self):
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError("no such file")):
+            ok = hud.run_mode_command("nonexistent.exe", hud.MODE_OPEN_GATE, demo=False, confirm=True)
+        self.assertFalse(ok)
+
+    def test_nonzero_exit_code_returns_false(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=1)):
+            ok = hud.run_mode_command("opengate-rs.exe", hud.MODE_OPEN_GATE, demo=False, confirm=True)
+        self.assertFalse(ok)
+
+    def test_successful_live_dispatch_returns_true(self):
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)) as run:
+            ok = hud.run_mode_command("opengate-rs.exe", hud.MODE_OPEN_GATE, demo=False, confirm=True)
+        self.assertTrue(ok)
+        run.assert_called_once_with(
+            ["opengate-rs.exe", hud.DEFAULT_PROFILE, "--confirm-ram-write"], check=False)
+
+    def test_unknown_mode_returns_false(self):
+        with mock.patch("subprocess.run") as run:
+            ok = hud.run_mode_command("opengate-rs.exe", "bogus-mode")
+        self.assertFalse(ok)
+        run.assert_not_called()
+
+
+class TestStatusPillCliStandby(unittest.TestCase):
+    def test_cli_standby_overrides_ram_state_text(self):
+        text = hud.format_status_pill("PATCHED 3:2", "profile_4k_24p_stable", False, cli_standby=True)
+        self.assertIn("3:2 PREVIEW", text)
+        self.assertIn("CLI STANDBY", text)
+        self.assertNotIn("PATCHED 3:2", text)
+
+    def test_cli_standby_still_reports_profile_and_source(self):
+        text = hud.format_status_pill("STOCK 16:9", "fx30_v5.00", True, cli_standby=True)
+        self.assertIn("fx30_v5.00", text)
+        self.assertIn("DEMO", text)
+
+    def test_default_is_not_standby(self):
+        text = hud.format_status_pill("STOCK 16:9", "p", False)
+        self.assertNotIn("STANDBY", text)
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestHandleKey(unittest.TestCase):
+    """handle_key() is the pure state-transition function behind every
+    keypress in the preview loop - testable without a window, a camera, or a
+    real opengate-rs.exe."""
+
+    def setUp(self):
+        self.frame = np.full((4, 4, 3), 77, dtype=np.uint8)
+
+    def test_key_2_success_patches_and_clears_standby(self):
+        state = hud.initial_hud_state()
+        with mock.patch("subprocess.run", return_value=mock.Mock(returncode=0)):
+            state = hud.handle_key(ord("2"), state, self.frame, demo=True)
+        self.assertEqual(state["active_mode"], hud.MODE_OPEN_GATE)
+        self.assertEqual(state["ram_state"], "PATCHED 3:2")
+        self.assertFalse(state["cli_standby"])
+
+    def test_key_2_failure_never_raises_and_sets_standby_instead_of_crashing(self):
+        state = hud.initial_hud_state()
+        state["ram_state"] = "STOCK 16:9"
+        # Live mode, no confirm mechanism wired yet -> build_mode_command()
+        # raises PermissionError internally; handle_key() must absorb it.
+        try:
+            with mock.patch("subprocess.run") as run:
+                state = hud.handle_key(ord("2"), state, self.frame, demo=False)
+        except Exception as e:  # pragma: no cover - this is exactly the bug
+            self.fail(f"handle_key([2]) must never raise, raised {type(e).__name__}: {e}")
+        run.assert_not_called()
+        self.assertTrue(state["cli_standby"])
+        self.assertEqual(state["ram_state"], "STOCK 16:9")  # not overwritten to PATCHED
+
+    def test_key_2_failure_turns_guides_on_if_they_were_off(self):
+        state = hud.initial_hud_state()
+        state["guide_mode"] = "off"
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
+            state = hud.handle_key(ord("2"), state, self.frame, demo=False)
+        self.assertEqual(state["guide_mode"], "all")
+
+    def test_key_2_failure_leaves_existing_guide_mode_alone(self):
+        state = hud.initial_hud_state()
+        state["guide_mode"] = "16:9"
+        with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
+            state = hud.handle_key(ord("2"), state, self.frame, demo=False)
+        self.assertEqual(state["guide_mode"], "16:9")
+
+    def test_key_3_first_press_captures_frame_and_defaults_to_avg_blend(self):
+        state = hud.initial_hud_state()
+        state["blend_mode"] = "bright"  # should be reset on the FIRST capture
+        state = hud.handle_key(ord("3"), state, self.frame)
+        self.assertEqual(state["active_mode"], hud.MODE_GHOST)
+        self.assertEqual(state["blend_mode"], "avg")
+        self.assertTrue(np.array_equal(state["ghost_ref"], self.frame))
+
+    def test_key_3_second_press_refreshes_reference_without_resetting_blend_mode(self):
+        state = hud.initial_hud_state()
+        state = hud.handle_key(ord("3"), state, self.frame)  # first capture -> avg
+        state["blend_mode"] = "bright"  # user cycled it with M in the meantime
+        new_frame = np.full((4, 4, 3), 200, dtype=np.uint8)
+        state = hud.handle_key(ord("3"), state, new_frame)
+        self.assertEqual(state["blend_mode"], "bright")  # untouched this time
+        self.assertTrue(np.array_equal(state["ghost_ref"], new_frame))  # refreshed
+
+    def test_key_3_capture_is_a_copy_not_a_reference(self):
+        state = hud.initial_hud_state()
+        state = hud.handle_key(ord("3"), state, self.frame)
+        self.frame[:] = 0
+        self.assertTrue(np.all(state["ghost_ref"] == 77), "must be a copy, not aliased")
+
+    def test_key_1_returns_to_normal_live_view_and_clears_standby(self):
+        state = hud.initial_hud_state()
+        state["active_mode"] = hud.MODE_GHOST
+        state["cli_standby"] = True
+        with mock.patch("subprocess.run"):
+            state = hud.handle_key(ord("1"), state, self.frame, demo=False)
+        self.assertEqual(state["active_mode"], hud.MODE_STOCK)
+        self.assertEqual(state["ram_state"], "STOCK 16:9")
+        self.assertFalse(state["cli_standby"])
+
+    def test_unrecognized_key_leaves_state_unchanged(self):
+        state = hud.initial_hud_state()
+        new_state = hud.handle_key(ord("z"), state, self.frame)
+        self.assertEqual(new_state, state)
+
+    def test_state_is_not_mutated_in_place(self):
+        state = hud.initial_hud_state()
+        original = dict(state)
+        hud.handle_key(ord("g"), state, self.frame)
+        self.assertEqual(state, original)
 
 
 if __name__ == "__main__":
