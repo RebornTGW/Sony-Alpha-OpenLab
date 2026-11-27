@@ -337,6 +337,7 @@ pub fn senser_response_sha1(round_data: &[u8], key: &[u8], pid: u16) -> Vec<u8> 
 
 /// The three Senser key blobs per hash (copied from pmca/usb/constants.py by the
 /// user; verified against the cited fingerprints before use).
+#[derive(Debug)]
 pub struct SenserKeys {
     pub sha1: [Vec<u8>; 3],
     pub sha256: [Vec<u8>; 3],
