@@ -80,7 +80,8 @@ Each `SDIO_Connect` phase *must* have its 8-byte DATA phase consumed before
 reading the RESPONSE container — `PtpUsbDevice.transaction()` in
 `probe_a6700.py` (reused by `sdio_probe.py`) does this automatically. Getting
 this wrong is the most common way to desync the whole session and start
-seeing garbage on the next transaction.
+seeing garbage on the next transaction. Those 8 bytes are read and discarded,
+never decoded — their content is unexamined, not just unused.
 
 ### 2.2 What `GetDeviceInfo` reports, live
 
@@ -188,6 +189,49 @@ property is where a 3:2 "Open Gate" mode would surface even if the HAITA gate
 above let a write through. Combined with §2.4, this is the evidence trail
 that led the project away from "find the right property" and toward the
 RAM-descriptor research tracked in `host-injector`/`target-helper`.
+
+### 2.6 `0x9202` is a static capability manifest — Photo and Video report the same codes
+
+Captured `SDIO_GetExtDeviceInfo (0x9202)` live in both Photo and Video mode
+and diffed the two code lists it holds (see §2.3's structure): **both the
+351-property list and the 57-control-code list are byte-identical** between
+the two modes, same order, zero differences. `0x9202` tells you *what the
+camera could ever expose*, not what's active right now — the Photo/Video
+split lives entirely inside `0x9209`'s per-record `enable` flags and
+enum/range contents (§2.7), not in which codes `0x9202` lists.
+
+### 2.7 Observed `0x9209` state changes across modes
+
+Captured `0x9209` across Photo 3:2, Photo 16:9, and Video 16:9 (plus a
+frame-rate change within Video) and diffed every one of the 351 records
+between them. What actually moves:
+
+- **`0xD211` aspect_ratio** — the property this project cares about most.
+  Changes value between the two Photo captures (`1` → `2`, 3:2 → 16:9,
+  everything else held constant). In Video it goes further than just
+  reporting `2`: `enabled` flips to `False` and the Supported/Available
+  lists both go empty — the camera locks the property itself, not merely
+  the value, in Video mode. See §2.4.
+- **`0xD267` liveview_area** — reads `0` in every mode tested (Photo 3:2,
+  Photo 16:9, Video 16:9). No signal observed; not a usable crop-rectangle
+  readout via this call in any tested state.
+- **`0xD0D5`** (unnamed) — `enabled=False` in both tested Photo states;
+  flips to `enabled=True` when the movie recording setting / frame rate is
+  changed in Video. Toggles with the recording configuration, not with
+  Photo/Video alone.
+- **`0xD0FA`–`0xD0FF`** (unnamed, all `Get/Set`) — `enabled=True` in both
+  tested Photo states (identical values in 3:2 and 16:9, so aspect-ratio
+  independent), `enabled=False` in every Video state tested regardless of
+  shutter speed or frame-rate/recording-setting changes. A clean
+  Photo-active / Video-locked block — the mirror image of `0xD0D5`.
+- **`0xD242` recording_setting_movie** / **`0xD286`
+  recording_frame_rate_setting_movie** — linked: changing `0xD286`'s current
+  value narrows `0xD242`'s own Supported list (e.g. `[54,56,60]` →
+  `[46,51]`) to the formats valid at that frame rate. Neither moves with
+  aspect ratio.
+
+None of these have write-tested; all of the above is from read-only
+`GetAllExtDevicePropInfo` captures compared across camera states.
 
 ## 3. Using `sdio_probe.py`
 
