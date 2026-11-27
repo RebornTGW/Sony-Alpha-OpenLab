@@ -8,6 +8,7 @@
 //! No Sony firmware bytes: geometry words are arithmetic from the target resolution
 //! and live in the JSON; firmware-derived payloads stay in git-ignored `payloads/`.
 
+pub mod camera;
 pub mod descriptor;
 pub mod inject;
 pub mod pmca;

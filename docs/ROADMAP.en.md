@@ -1,4 +1,4 @@
-# Roadmap — Sony-Alpha-OpenLab
+# Roadmap — Sony-Open-Gate-Lab
 
 **🌍 Language: English · [Français](ROADMAP.md)**
 
@@ -49,12 +49,28 @@ describes **capabilities and goals only** — no proprietary firmware internals.
 - This remains exploratory and is pursued only within the no-permanent-write policy.
 
 ### 3. More Sony Alpha bodies
-- **Sony APS-C (BIONZ XR) first** — modular `cameras/` profiles: **A6700** (done),
-  **FX30**, **ZV-E10 II** (same 26 MP APS-C BIONZ XR sensor).
-- **BIONZ XR Full-Frame** next: e.g. A7 IV, A7C II.
-- **BIONZ X** bodies afterward (older dialect): A6400, A6600, ZV-E10 Mark I.
-  (ZV-E1 is Full-Frame, handled separately.)
+- **BIONZ XR first** — 14 bodies now catalogued under `cameras/`, grouped by
+  sensor family: **A6700** (verified), plus 13 locked-skeleton bodies (FX30,
+  ZV-E10 II, A7S III, FX3, ZV-E1, A7 IV, A7C II, FX2, A7R V, A7CR, A1, A1 II,
+  A9 III) awaiting hardware (`--dump-ram` / `--scan-dump`).
+- **BIONZ X** bodies are a different, older protocol generation -
+  `host-injector`'s Senser `0x0336` path now refuses them outright (see
+  `host-injector/src/camera.rs`'s PID blocklist) rather than risk sending that
+  protocol at incompatible hardware.
 - Community help wanted to validate per-body PIDs, property sets and control codes.
+
+### 4. Upcoming BIONZ X research (Sony A6400)
+- A separate research track, not an extension of `host-injector`'s Senser
+  `0x0336` path (explicitly blocked there - see §3 above and the root
+  README's "Security Architecture & BIONZ X Guardrails" table).
+- **RAW 16-bit multi-exposure validation**: confirm `multi_exposure.py`'s
+  `--raw-blend` (linear 16-bit `.ARW` stacking) and `monitor_hud.py` behave
+  correctly on BIONZ X's sensor/RAW output - both already work on any Sony
+  body generically, this is about validating assumptions, not new code.
+- **Non-Senser USB/PMCA protocol study**: BIONZ X bodies use their own,
+  undocumented-here service-mode dialect. Read-only study first, same
+  clean-room rules as everything else in this repo - no write path until (if
+  ever) a BIONZ X-specific protocol is independently verified safe.
 
 ---
 

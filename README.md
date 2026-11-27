@@ -152,6 +152,44 @@ ISO 15740) and the independently documented Sony vendor space.
 
 ---
 
+## 🛡️ Security Architecture & BIONZ X Guardrails
+
+Not every tool here talks to the camera the same way, and not every protocol
+has been checked against every processor generation. This table is the quick
+reference for which is which:
+
+| Tool / flag | Protocol | BIONZ XR (A6700 + the 13-body catalog) | BIONZ X (A6400, A6600, A6100, A7 III, A7C, …) |
+|---|---|---|---|
+| `probe_a6700.py`, `experiment_a6700.py` | PTP / Sony "SDIO" vendor extension | ✅ works | Expected to work (same PTP/SDIO family) — **not yet validated** on a BIONZ X body |
+| `multi_exposure.py` (`--raw-blend`, `--live-ghost`) | Generic: PTP capture + local RAW decode (`rawpy`) / image processing | ✅ works | ✅ works — camera-generation-agnostic, no vendor-specific protocol involved |
+| `monitor_hud.py` | Generic: reads frames from a webcam/video/image source, no camera protocol of its own | ✅ works | ✅ works — same reason as above |
+| `ram_opengate.py --probe-msc` | Standard SCSI (INQUIRY / TEST UNIT READY / READ CAPACITY) | ✅ works | Expected to work (standard SCSI, not Sony-specific) — **not yet validated** |
+| **`opengate-rs.exe`** (`host-injector`) — **RAM injection, `--verify-only`, `--dump-ram`, `--scan-dump`** | **Senser `0x0336` service mode** (clean-room from `ma1co/Sony-PMCA-RE`) | ✅ the only thing this protocol is modeled for | 🛑 **refused outright** — see below |
+
+**The guardrail is real code, not just a table.** `host-injector`'s
+`usb::open_a6700()` — the single entry point every one of its real-hardware
+actions goes through, `--plan`/`--verify-only`/`--confirm-ram-write`/
+`--dump-ram` alike — scans every connected Sony-VID USB device first and
+refuses immediately, before a single SCSI vendor packet is sent, if a known
+BIONZ X PID is on the bus:
+
+| PID | Body |
+|---|---|
+| `0x0C68` | A6400 |
+| `0x0C9F` | A6600 |
+| `0x0C9B` | A6100 |
+| `0x0C34` | A7 III |
+| `0x0D0A` | A7C |
+
+(`host-injector/src/camera.rs` — not an exhaustive list of every BIONZ X body
+or PID, just the known-incompatible ones checked so far. An unlisted PID is
+not thereby assumed safe; `VENDOR_PROTOCOL_VERIFIED`/`--allow-unverified-usb`
+still gate everything else as usual.) **If you have a BIONZ X body, use
+`multi_exposure.py` (`--raw-blend` / `--live-ghost`) or `monitor_hud.py`
+instead** — both are camera-generation-agnostic and already work there.
+
+---
+
 ## 📦 Installation (Windows)
 
 ### 1. Python and dependencies

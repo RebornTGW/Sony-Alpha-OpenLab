@@ -1,4 +1,4 @@
-# Feuille de route — Sony-Alpha-OpenLab
+# Feuille de route — Sony-Open-Gate-Lab
 
 **🌍 Langue : [English](ROADMAP.en.md) · Français**
 
@@ -58,13 +58,32 @@ propriétaire du firmware.
   écriture permanente ».
 
 ### 3. Autres boîtiers Sony Alpha
-- **Sony APS-C (BIONZ XR) d'abord** — profils modulaires `cameras/` : **A6700**
-  (fait), **FX30**, **ZV-E10 II** (même capteur 26 MP APS-C BIONZ XR).
-- **BIONZ XR Full-Frame** ensuite : ex. A7 IV, A7C II.
-- **BIONZ X** par la suite (dialecte plus ancien) : A6400, A6600, ZV-E10 Mark I.
-  (ZV-E1 = Full-Frame, traité à part.)
+- **BIONZ XR d'abord** — 14 boîtiers catalogués dans `cameras/`, groupés par
+  famille de capteur : **A6700** (vérifié), plus 13 boîtiers à squelette
+  verrouillé (FX30, ZV-E10 II, A7S III, FX3, ZV-E1, A7 IV, A7C II, FX2, A7R V,
+  A7CR, A1, A1 II, A9 III) en attente de matériel (`--dump-ram` / `--scan-dump`).
+- Les boîtiers **BIONZ X** sont une génération de protocole différente, plus
+  ancienne - le chemin Senser `0x0336` de `host-injector` les refuse
+  désormais explicitement (voir la liste de PID bloqués dans
+  `host-injector/src/camera.rs`) plutôt que de risquer d'envoyer ce protocole
+  à du matériel incompatible.
 - Aide de la communauté bienvenue pour valider PID, jeux de propriétés et codes de
   contrôle par boîtier.
+
+### 4. Recherche BIONZ X à venir (Sony A6400)
+- Un axe de recherche séparé, pas une extension du chemin Senser `0x0336` de
+  `host-injector` (explicitement bloqué là - voir §3 ci-dessus et le tableau
+  « Architecture de sécurité & garde-fous BIONZ X » du README racine).
+- **Validation multi-exposition RAW 16 bits** : confirmer que `--raw-blend`
+  de `multi_exposure.py` (empilement linéaire 16 bits de `.ARW`) et
+  `monitor_hud.py` se comportent correctement sur le capteur/RAW du BIONZ X -
+  les deux fonctionnent déjà génériquement sur tout boîtier Sony, il s'agit
+  de valider les hypothèses, pas d'écrire du nouveau code.
+- **Étude du protocole USB/PMCA non-Senser** : les boîtiers BIONZ X utilisent
+  leur propre dialecte de mode service, non documenté ici. Étude en lecture
+  seule d'abord, mêmes règles clean-room que partout dans ce dépôt - aucun
+  chemin d'écriture avant qu'un protocole spécifique BIONZ X ne soit (le cas
+  échéant) vérifié sûr de manière indépendante.
 
 ---
 

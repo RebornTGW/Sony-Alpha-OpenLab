@@ -15,11 +15,17 @@ one-session USB state machine with automatic rollback.
 - **RAII rollback** — a `SessionGuard` records each write's stock bytes; if any write
   fails its readback (or a USB error fires mid-chain), `Drop` undoes every write done
   so far, in reverse. No half-applied state left behind.
-- **Refuses to guess** — the service-mode auth handshake (`enter_service()`) is
-  implemented and gated; RAM read/write still needs the on-camera helper loaded over
-  a connected shell, which isn't wired up yet, so those calls return a clear "blocked
-  on enter_service" error rather than fabricate bytes. `MockRam` stands in for the
-  tests.
+- **Refuses to guess** — the service-mode auth handshake, FileControl (file write),
+  MemoryDump (RAM read), and the Senser terminal are all implemented and gated
+  (see "Vendor protocol" below); anything not cited anywhere fetched from PMCA-RE
+  (the SHA256 auth path, chunking above 1 MiB) refuses rather than fabricate bytes.
+  `MockRam`/`MockSenserIo` stand in for the tests.
+- **Refuses the wrong camera generation** — `usb::open_a6700()`, the single entry
+  point every real-hardware action goes through, scans the USB bus first and
+  refuses outright if a known BIONZ X body (A6400, A6600, A6100, A7 III, A7C) is
+  connected, before a single SCSI vendor packet is sent. This crate's Senser
+  `0x0336` protocol is modeled for BIONZ XR only; see `src/camera.rs` and the root
+  README's "Security Architecture & BIONZ X Guardrails".
 
 ## Build & test
 

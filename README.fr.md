@@ -205,6 +205,45 @@ et l'espace vendor Sony documenté de façon indépendante.
 
 ---
 
+## 🛡️ Architecture de sécurité & garde-fous BIONZ X
+
+Tous les outils d'ici ne parlent pas à la caméra de la même façon, et tous les
+protocoles n'ont pas été vérifiés sur chaque génération de processeur. Ce
+tableau est la référence rapide :
+
+| Outil / option | Protocole | BIONZ XR (A6700 + les 13 boîtiers catalogués) | BIONZ X (A6400, A6600, A6100, A7 III, A7C, …) |
+|---|---|---|---|
+| `probe_a6700.py`, `experiment_a6700.py` | PTP / extension vendor Sony « SDIO » | ✅ fonctionne | Censé fonctionner (même famille PTP/SDIO) — **pas encore validé** sur un boîtier BIONZ X |
+| `multi_exposure.py` (`--raw-blend`, `--live-ghost`) | Générique : capture PTP + décodage RAW local (`rawpy`) / traitement d'image | ✅ fonctionne | ✅ fonctionne — agnostique de la génération, aucun protocole vendor spécifique |
+| `monitor_hud.py` | Générique : lit des vues depuis une webcam/vidéo/source image, aucun protocole caméra propre | ✅ fonctionne | ✅ fonctionne — même raison que ci-dessus |
+| `ram_opengate.py --probe-msc` | SCSI standard (INQUIRY / TEST UNIT READY / READ CAPACITY) | ✅ fonctionne | Censé fonctionner (SCSI standard, non spécifique Sony) — **pas encore validé** |
+| **`opengate-rs.exe`** (`host-injector`) — **injection RAM, `--verify-only`, `--dump-ram`, `--scan-dump`** | **Mode service Senser `0x0336`** (clean-room depuis `ma1co/Sony-PMCA-RE`) | ✅ la seule chose pour laquelle ce protocole est modélisé | 🛑 **refusé d'office** — voir ci-dessous |
+
+**Le garde-fou est du vrai code, pas qu'un tableau.** `usb::open_a6700()` de
+`host-injector` — le point d'entrée unique par lequel passe chaque action sur
+matériel réel, `--plan`/`--verify-only`/`--confirm-ram-write`/`--dump-ram`
+compris — scanne d'abord tous les périphériques USB de VID Sony connectés et
+refuse immédiatement, avant l'envoi du moindre paquet vendor SCSI, si un PID
+BIONZ X connu est sur le bus :
+
+| PID | Boîtier |
+|---|---|
+| `0x0C68` | A6400 |
+| `0x0C9F` | A6600 |
+| `0x0C9B` | A6100 |
+| `0x0C34` | A7 III |
+| `0x0D0A` | A7C |
+
+(`host-injector/src/camera.rs` — pas une liste exhaustive de tous les
+boîtiers ou PID BIONZ X, seulement ceux connus comme incompatibles vérifiés
+jusqu'ici. Un PID absent n'est pas pour autant supposé sûr ;
+`VENDOR_PROTOCOL_VERIFIED`/`--allow-unverified-usb` verrouillent tout le
+reste comme d'habitude.) **Si vous avez un boîtier BIONZ X, utilisez
+`multi_exposure.py` (`--raw-blend` / `--live-ghost`) ou `monitor_hud.py`** —
+les deux sont agnostiques de la génération et fonctionnent déjà dessus.
+
+---
+
 ## 📦 Installation (Windows)
 
 ### 1. Python et dépendances
