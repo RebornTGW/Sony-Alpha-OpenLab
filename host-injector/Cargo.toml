@@ -1,0 +1,24 @@
+[package]
+name = "opengate-rs"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Single-session volatile RAM Open Gate injector for the Sony A6700 (host side, clean-room MIT)."
+repository = "https://github.com/RebornTGW/Sony-Alpha-OpenLab"
+
+[[bin]]
+name = "opengate-rs"
+path = "src/main.rs"
+
+[lib]
+name = "opengate_rs"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1.0.210", features = ["derive"] }
+serde_json = "1.0.128"
+rusb = "0.9.4"
+
+[profile.release]
+opt-level = "z"
+lto = true
