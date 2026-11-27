@@ -472,6 +472,37 @@ RAW_BLEND_MIN_FRAMES = 2
 RAW_BLEND_MAX_FRAMES = 9
 
 
+def compose_ghost_preview(live_frame, captured_frames, mode):
+    """Blend captured frames with a live preview frame using RAW blend modes."""
+    import numpy as np
+
+    if mode not in RAW_BLEND_MODES:
+        raise ValueError(f"unknown ghost preview mode {mode!r}")
+
+    live = np.asarray(live_frame)
+    if not np.issubdtype(live.dtype, np.integer):
+        raise TypeError("ghost preview frames must use an integer dtype")
+    if not captured_frames:
+        return live.copy()
+
+    frames = [np.asarray(frame) for frame in captured_frames]
+    if any(frame.shape != live.shape for frame in frames):
+        raise ValueError("ghost preview frame shapes must match the live frame")
+    stack = np.stack(frames + [live], axis=0).astype(np.float64)
+
+    if mode == "dark":
+        out = stack.min(axis=0)
+    elif mode == "bright":
+        out = stack.max(axis=0)
+    elif mode == "avg":
+        out = stack.mean(axis=0)
+    else:
+        out = stack.sum(axis=0)
+
+    limits = np.iinfo(live.dtype)
+    return np.clip(np.rint(out), limits.min, limits.max).astype(live.dtype)
+
+
 def blend_raw16(frames, mode):
     """Blend 2..9 same-shape uint16 arrays into one uint16 array, in linear light.
 
@@ -797,6 +828,86 @@ def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend,
     return state["saved"]
 
 
+def live_ghost(source, shots, mode):
+    """Show an OpenCV live feed blended with manually captured preview frames."""
+    try:
+        import cv2
+    except ImportError:
+        print("[live-ghost] OpenCV is required; install it with: pip install opencv-python")
+        return False
+
+    image_paths = None
+    capture = None
+    source_path = os.fspath(source)
+    if os.path.isdir(source_path):
+        supported = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+        image_paths = sorted(
+            os.path.join(source_path, name)
+            for name in os.listdir(source_path)
+            if os.path.splitext(name)[1].lower() in supported
+        )
+        if not image_paths:
+            print(f"[live-ghost] no supported images found in {source_path}")
+            return False
+    else:
+        source_value = source_path
+        if source_path.isdecimal():
+            source_value = int(source_path)
+        if isinstance(source_value, int) and source_value < 0:
+            print("[live-ghost] webcam index must be >= 0")
+            return False
+        capture = cv2.VideoCapture(source_value)
+        if not capture.isOpened():
+            print(f"[live-ghost] could not open source {source_path!r}")
+            capture.release()
+            return False
+
+    captured_frames = []
+    image_index = 0
+    try:
+        while True:
+            if image_paths is not None:
+                frame = cv2.imread(image_paths[image_index])
+                image_index = (image_index + 1) % len(image_paths)
+            else:
+                ok, frame = capture.read()
+                if not ok and not source_path.isdecimal():
+                    capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ok, frame = capture.read()
+                if not ok:
+                    print(f"[live-ghost] failed to read from source {source_path!r}")
+                    return False
+
+            if frame is None:
+                print("[live-ghost] could not decode a frame from the source")
+                return False
+
+            ghost_frames = [
+                cv2.resize(saved, (frame.shape[1], frame.shape[0]))
+                if saved.shape != frame.shape else saved
+                for saved in captured_frames
+            ]
+            preview = compose_ghost_preview(frame, ghost_frames, mode)
+            label = f"Manual {len(captured_frames)}/{shots} exp. [{mode}]"
+            cv2.putText(preview, label, (16, 32), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(preview, label, (16, 32), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.75, (255, 255, 255), 1, cv2.LINE_AA)
+            cv2.imshow("Live ghost preview", preview)
+            key = cv2.waitKey(30) & 0xFF
+            if key in (ord("q"), ord("Q")):
+                break
+            if key in (ord("r"), ord("R")):
+                captured_frames.clear()
+            elif key == ord(" ") and len(captured_frames) < shots:
+                captured_frames.append(frame.copy())
+    finally:
+        if capture is not None:
+            capture.release()
+        cv2.destroyAllWindows()
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -838,6 +949,17 @@ def main():
                          "bright/lighten = per-pixel max (star trails, bright subjects); "
                          "dark/darken = per-pixel min (silhouettes); "
                          "screen = 1-(1-A)(1-B) (soft double-exposure look).")
+    ap.add_argument("--raw-blend", nargs="+", metavar="ARW",
+                    help="Blend 2..9 RAW .ARW files directly into a linear 16-bit TIFF.")
+    ap.add_argument("--mode", choices=RAW_BLEND_MODES, default=None,
+                    help="Blend mode for --raw-blend or --live-ghost: "
+                         "dark, bright, avg, or add (default: avg).")
+    ap.add_argument("-o", "--output", metavar="OUT.tiff",
+                    help="Output 16-bit TIFF for --raw-blend.")
+    ap.add_argument("--live-ghost", action="store_true",
+                    help="Open a live/manual ghost preview (webcam, video, or image folder).")
+    ap.add_argument("--source", default=None, metavar="INDEX|PATH",
+                    help="For --live-ghost: webcam index (e.g. 0), video, or image folder.")
     ap.add_argument("--stack-all", action="store_true",
                     help="Render ALL 4 core Fujifilm modes from the same frames into "
                          "<stem>_additive/_average/_bright/_dark so you can compare.")
@@ -863,6 +985,36 @@ def main():
     args = ap.parse_args()
     global VERBOSE
     VERBOSE = args.verbose
+
+    if args.raw_blend is not None and args.live_ghost:
+        ap.error("--raw-blend and --live-ghost cannot be used together")
+
+    if args.raw_blend is not None:
+        if args.source is not None:
+            ap.error("--source can only be used with --live-ghost")
+        if not RAW_BLEND_MIN_FRAMES <= len(args.raw_blend) <= RAW_BLEND_MAX_FRAMES:
+            ap.error(f"--raw-blend requires {RAW_BLEND_MIN_FRAMES}.."
+                     f"{RAW_BLEND_MAX_FRAMES} .ARW files")
+        if not all(path.lower().endswith(".arw") for path in args.raw_blend):
+            ap.error("--raw-blend accepts only .ARW files")
+        if not args.output:
+            ap.error("--output is required with --raw-blend")
+        if not args.output.lower().endswith(".tiff"):
+            ap.error("--output must have a .tiff extension")
+        ok = blend_raw_files(args.raw_blend, args.output, mode=args.mode or "avg")
+        sys.exit(0 if ok else 1)
+    if args.live_ghost:
+        if args.output is not None:
+            ap.error("--output can only be used with --raw-blend")
+        if not 2 <= args.shots <= RAW_BLEND_MAX_FRAMES:
+            ap.error(f"--live-ghost requires --shots {RAW_BLEND_MIN_FRAMES}.."
+                     f"{RAW_BLEND_MAX_FRAMES}")
+        source = args.source if args.source is not None else "0"
+        sys.exit(0 if live_ghost(source, args.shots, args.mode or "avg") else 1)
+    if args.mode is not None or args.output is not None:
+        ap.error("--mode and --output can only be used with --raw-blend or --live-ghost")
+    if args.source is not None:
+        ap.error("--source can only be used with --live-ghost")
 
     # Offline stacking: --stack-dir without a capture does NOT touch the camera, so
     # it runs directly, no --confirm-session-write needed.

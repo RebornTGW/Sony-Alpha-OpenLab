@@ -457,6 +457,11 @@ python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode br
 python multi_exposure.py --stack-dir ./frames --stack out/me.png --stack-all
 #   -> out/me_additive.png  out/me_average.png  out/me_bright.png  out/me_dark.png
 
+# OFFLINE 16-bit linear RAW blend: 2..9 Sony .ARW files -> 16-bit TIFF
+python multi_exposure.py --raw-blend frame1.ARW frame2.ARW frame3.ARW \
+    --mode avg --output out/merged.tiff
+# RAW modes: dark, bright, avg, add
+
 # Fujifilm step-by-step: [Enter] next / [r] retake last / [q] finish & stack
 python multi_exposure.py --confirm-session-write --interactive --shots 3 \
     --download-dir out/ --stack out/double.png --stack-mode screen
@@ -464,6 +469,11 @@ python multi_exposure.py --confirm-session-write --interactive --shots 3 \
 # Real-time Live View overlay (align frame 2 over frame 1 live; Space to capture)
 python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
     --download-dir out/ --stack out/double.png --stack-mode screen --overlay-opacity 0.5
+
+# Manual live ghost preview: webcam index, video file, or folder of images
+python multi_exposure.py --live-ghost --source 0 --shots 3 --mode avg
+# Offline preview from a video or image folder; Space freezes, R resets, Q quits
+python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
 ```
 
 | Option | Purpose |
@@ -477,6 +487,7 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 | `--stack-all` | render all 4 core Fujifilm modes from the same frames at once |
 | `--interactive` / `--manual-step` | step-by-step: `[Enter]` next / `[r]` retake last / `[q]` finish & stack |
 | `--live-overlay` / `--overlay-opacity` | live window blending the feed (`0xFFFFC002`) over frame 1; Space captures |
+| `--live-ghost` / `--source` | OpenCV preview from webcam index (e.g. `0`), video, or image folder; `--shots` 2..9; Space captures, `R` resets, `Q` quits |
 
 **Native double-exposure experience.** `--interactive` reproduces the Fujifilm
 in-camera flow: shoot frame 1, then for each next frame choose `[Enter]` to shoot,
@@ -485,6 +496,12 @@ each shot so you can judge the composition. `--live-overlay` goes further: it sh
 real-time Live View superimposed over the previous frame(s) so you can align before
 pressing **Space**. The overlay window uses `tkinter` (bundled with Python) + Pillow —
 no extra dependency.
+
+`--live-ghost` is a separate manual preview using a webcam/UVC device or an offline
+video/image folder. It shows the current frame blended with captured frames and a
+`Manual k/N exp. [mode]` HUD. Install its optional dependency with
+`pip install opencv-python`; press **Space** to freeze a shot, **R** to reset, or **Q**
+to quit. Available modes are `dark`, `bright`, `avg`, and `add`.
 
 **Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose
 `GetObjectHandles`; it places the last captured image on the special Sony handle
@@ -797,7 +814,7 @@ Sony-Alpha-OpenLab/
 ├── target-helper/       # native rewrite, on-camera helper (Zig 0.17.1 / C99) + README
 ├── profiles/            # declarative Open Gate patch tables (JSON) + format README
 ├── sony_codes.py        # generated PTP code dictionaries (protocol constants)
-├── requirements.txt   # Python dependencies (pyusb; pillow/numpy optional)
+├── requirements.txt   # Python dependencies (pyusb; pillow/numpy/OpenCV optional)
 ├── .gitignore         # strict exclusion of firmware binaries + raw dumps
 ├── LICENSE            # MIT license
 ├── RESEARCH.md        # original A6700 2.00 hardware findings

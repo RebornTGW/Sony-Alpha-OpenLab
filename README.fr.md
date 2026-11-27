@@ -518,6 +518,11 @@ python multi_exposure.py --stack-dir ./frames --stack trails.png --stack-mode br
 python multi_exposure.py --stack-dir ./frames --stack out/me.png --stack-all
 #   -> out/me_additive.png  out/me_average.png  out/me_bright.png  out/me_dark.png
 
+# Fusion RAW linéaire HORS-LIGNE en 16 bits : 2 à 9 fichiers Sony .ARW -> TIFF 16 bits
+python multi_exposure.py --raw-blend frame1.ARW frame2.ARW frame3.ARW \
+    --mode avg --output out/merged.tiff
+# Modes RAW : dark, bright, avg, add
+
 # Pas-à-pas Fujifilm : [Entrée] suivante / [r] refaire la dernière / [q] finir & fusionner
 python multi_exposure.py --confirm-session-write --interactive --shots 3 \
     --download-dir out/ --stack out/double.png --stack-mode screen
@@ -525,6 +530,11 @@ python multi_exposure.py --confirm-session-write --interactive --shots 3 \
 # Aperçu Live View superposé en temps réel (aligner la Vue 2 ; Espace = déclencher)
 python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
     --download-dir out/ --stack out/double.png --stack-mode screen --overlay-opacity 0.5
+
+# Aperçu fantôme manuel : index webcam, vidéo ou dossier d'images
+python multi_exposure.py --live-ghost --source 0 --shots 3 --mode avg
+# Aperçu hors ligne ; Espace fige, R réinitialise, Q quitte
+python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
 ```
 
 | Option | Rôle |
@@ -538,6 +548,7 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 | `--stack-all` | rend les 4 modes Fujifilm de base à partir des mêmes vues |
 | `--interactive` / `--manual-step` | pas-à-pas : `[Entrée]` suivante / `[r]` refaire la dernière / `[q]` finir & fusionner |
 | `--live-overlay` / `--overlay-opacity` | fenêtre live superposant le flux (`0xFFFFC002`) sur la Vue 1 ; Espace déclenche |
+| `--live-ghost` / `--source` | aperçu OpenCV depuis une webcam (p. ex. `0`), vidéo ou dossier d'images ; `--shots` de 2 à 9 ; Espace capture, `R` réinitialise, `Q` quitte |
 
 **Expérience double exposition native.** `--interactive` reproduit le flux Fujifilm :
 prendre la Vue 1, puis pour chaque vue suivante choisir `[Entrée]` pour déclencher,
@@ -546,6 +557,12 @@ chaque prise pour juger la composition. `--live-overlay` va plus loin : il super
 Live View en temps réel sur la/les vue(s) précédente(s) pour aligner avant d'appuyer sur
 **Espace**. La fenêtre utilise `tkinter` (fourni avec Python) + Pillow — aucune
 dépendance supplémentaire.
+
+`--live-ghost` est un aperçu manuel séparé, depuis une webcam/UVC ou une vidéo/un
+dossier d'images hors ligne. Il superpose la vue courante aux prises mémorisées et
+affiche le HUD `Manual k/N exp. [mode]`. Installez la dépendance facultative avec
+`pip install opencv-python` ; **Espace** fige une prise, **R** réinitialise et **Q**
+quitte. Modes disponibles : `dark`, `bright`, `avg` et `add`.
 
 **Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
 `GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial
@@ -766,7 +783,7 @@ Sony-Alpha-OpenLab/
 ├── opengate_inject.py   # injecteur Open Gate mono-session (charge profiles/)
 ├── profiles/            # tables de patch Open Gate déclaratives (JSON) + README du format
 ├── sony_codes.py        # dictionnaires de codes PTP (constantes de protocole)
-├── requirements.txt   # dépendances Python (pyusb ; pillow/numpy optionnels)
+├── requirements.txt   # dépendances Python (pyusb ; pillow/numpy/OpenCV optionnels)
 ├── .gitignore         # exclusion stricte des binaires/firmware + dumps bruts
 ├── LICENSE            # licence MIT
 ├── RESEARCH.md        # découvertes matérielles inédites A6700 2.00
