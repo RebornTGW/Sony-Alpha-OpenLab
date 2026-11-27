@@ -32,6 +32,21 @@ cargo run -- profile_4k_24p_stable --video-standard NTSC --dial MOVIE   # plan +
 > Needs the camera only for `--verify-only` / `--confirm-ram-write`; everything else
 > (plan, preflight, tests) runs with no hardware.
 
+## Vendor protocol (`pmca.rs`)
+
+The Sony USB vendor framing (MSC vendor CDB `0x7a`, `ExtCmdHeader`, Senser service
+mode + FileControl/MemoryDump, the service PIDs) is transcribed **clean-room** from
+the public MIT project [`ma1co/Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE),
+cited by file + symbol in the source. Two pieces are **gaps** not in the fetched
+files — the Senser auth keys and the camera-shell exec tokens (both under
+`pmca/platform`) — so the end-to-end path cannot complete from public MIT alone, and
+those steps refuse rather than guess.
+
+Two gates protect the camera:
+- `VENDOR_PROTOCOL_VERIFIED` (compile-time) stays `false` until proven on a real A6700.
+- `--allow-unverified-usb` (runtime, with an interactive `yes` confirm) lets a tester
+  send real frames without recompiling. Even then the documented gaps still refuse.
+
 ## Clean-room / safety
 
 No Sony firmware bytes. Geometry words are arithmetic from the target resolution and

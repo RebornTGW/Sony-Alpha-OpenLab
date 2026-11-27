@@ -25,7 +25,8 @@ OPTIONS:\n\
   --confirm-ram-write     opt-in: apply the profile (volatile RAM)\n\
   --video-standard NTSC|PAL   preflight: body TV standard\n\
   --dial MOVIE|STILL          preflight: mode-dial position\n\
-  --profiles-dir DIR      where to find the JSON profiles (default: ../profiles)\n"
+  --profiles-dir DIR      where to find the JSON profiles (default: ../profiles)\n\
+  --allow-unverified-usb  send real (unverified) vendor frames; asks to confirm\n"
     );
 }
 
@@ -39,6 +40,7 @@ fn main() -> ExitCode {
     let mut confirm = false;
     let mut vs: Option<VideoStd> = None;
     let mut dial: Option<Dial> = None;
+    let mut allow_unverified = false;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -51,6 +53,7 @@ fn main() -> ExitCode {
             "--plan" => {}
             "--verify-only" => verify_only = true,
             "--confirm-ram-write" => confirm = true,
+            "--allow-unverified-usb" => allow_unverified = true,
             "--video-standard" => {
                 vs = match it.next().map(|s| s.to_ascii_uppercase()).as_deref() {
                     Some("NTSC") => Some(VideoStd::Ntsc),
@@ -133,6 +136,16 @@ fn main() -> ExitCode {
         eprintln!("[ERROR] probe: {e}");
         return ExitCode::FAILURE;
     }
+
+    if allow_unverified {
+        if !confirm_unverified() {
+            eprintln!("[abort] --allow-unverified-usb not confirmed.");
+            return ExitCode::FAILURE;
+        }
+        link.set_allow_unverified(true);
+        println!("[warn ] unverified USB vendor frames ENABLED for this run.");
+    }
+
     if let Err(e) = link.enter_service() {
         eprintln!("[ERROR] {e}");
         return ExitCode::FAILURE;
@@ -174,6 +187,22 @@ fn main() -> ExitCode {
             eprintln!("[ERROR] {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Interactive confirm for --allow-unverified-usb: real vendor bytes to the camera.
+fn confirm_unverified() -> bool {
+    use std::io::Write;
+    print!(
+        "\n!! --allow-unverified-usb: this sends REAL, unverified Sony vendor frames \
+         to the camera.\n   Never run on an A6700; a wrong frame can reboot or wedge \
+         the body (battery pull to recover).\n   Type 'yes' to proceed: "
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(_) => line.trim().eq_ignore_ascii_case("yes"),
+        Err(_) => false,
     }
 }
 

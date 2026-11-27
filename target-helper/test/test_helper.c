@@ -70,7 +70,7 @@ int main(void) {
         uint8_t t[4] = { 1, 2, 3, 4 };
         put_record(blob, &pos, BASE + 16, bad_stock, t, 4, 0);
         int r = og_apply(blob, pos, &win);
-        CHECK(r < 0 && og_result_err(r) == -OG_ERR_STOCK, "stock mismatch -> OG_ERR_STOCK");
+        CHECK(r < 0 && og_result_err(r) == OG_ERR_STOCK, "stock mismatch -> OG_ERR_STOCK");
         CHECK(og_result_index(r) == 0, "failing index is 0");
         CHECK(mem[16] == 0x10, "nothing written on stock mismatch");
     }
@@ -81,7 +81,7 @@ int main(void) {
         uint8_t s[2] = { 0, 0 }, t[2] = { 1, 1 };
         put_record(blob, &pos, BASE + 1000, s, t, 2, 0);  /* past 256-byte window */
         int r = og_apply(blob, pos, &win);
-        CHECK(r < 0 && og_result_err(r) == -OG_ERR_RANGE, "range check -> OG_ERR_RANGE");
+        CHECK(r < 0 && og_result_err(r) == OG_ERR_RANGE, "range check -> OG_ERR_RANGE");
     }
 
     /* --- test 4: bad magic --- */
