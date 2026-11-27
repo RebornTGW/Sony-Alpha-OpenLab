@@ -1,4 +1,4 @@
-# Sony-Alpha-OpenLab
+# Sony-Open-Gate-Lab
 
 **🌍 Langue : [English](README.md) · Français**
 
@@ -794,7 +794,7 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 ## 📁 Contenu du dépôt
 
 ```
-Sony-Alpha-OpenLab/
+Sony-Open-Gate-Lab/
 ├── cameras/             # 14 profils de boîtiers BIONZ XR (identité USB) + loader cameras.py
 ├── probe_a6700.py       # sonde diagnostic USB lecture seule
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)

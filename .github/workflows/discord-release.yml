@@ -55,7 +55,7 @@ jobs:
                   { name: "Tag", value: $tag, inline: true },
                   { name: "Released by", value: $author, inline: true }
                 ],
-                footer: { text: "Sony-Alpha-OpenLab" }
+                footer: { text: "Sony-Open-Gate-Lab" }
               }]
             }')
 

@@ -1,4 +1,4 @@
-# Guide de contribution — Sony-Alpha-OpenLab
+# Guide de contribution — Sony-Open-Gate-Lab
 
 **🌍 Langue : [English](CONTRIBUTING.md) · Français**
 

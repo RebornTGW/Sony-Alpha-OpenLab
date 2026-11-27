@@ -1,4 +1,4 @@
-# Sony-Alpha-OpenLab
+# Sony-Open-Gate-Lab
 
 **🌍 Language: English · [Français](README.fr.md)**
 
@@ -823,7 +823,7 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 ## 📁 Repository layout
 
 ```
-Sony-Alpha-OpenLab/
+Sony-Open-Gate-Lab/
 ├── cameras/             # 14 BIONZ XR body profiles (USB identity) + cameras.py loader
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)

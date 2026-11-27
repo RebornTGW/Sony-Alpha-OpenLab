@@ -1,4 +1,4 @@
-# Contributing — Sony-Alpha-OpenLab
+# Contributing — Sony-Open-Gate-Lab
 
 **🌍 Language: English · [Français](CONTRIBUTING.fr.md)**
 
