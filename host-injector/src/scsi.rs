@@ -144,6 +144,17 @@ impl<P: BulkPipe> MscBot<P> {
     pub fn vendor_out(&mut self, cdb: &[u8], data: &[u8]) -> Result<u8> {
         self.command_out(cdb, data)
     }
+
+    /// Borrow the underlying pipe (e.g. to reach `UsbPipe`-only methods like
+    /// `control_out`, which isn't part of the generic `BulkPipe` trait).
+    pub fn pipe(&self) -> &P {
+        &self.pipe
+    }
+
+    /// Mutable borrow of the underlying pipe (e.g. `UsbPipe::release`).
+    pub fn pipe_mut(&mut self) -> &mut P {
+        &mut self.pipe
+    }
 }
 
 // --------------------------------------------------------------------------- //
@@ -200,6 +211,16 @@ impl UsbPipe {
 
     pub fn release(&mut self) {
         let _ = self.handle.release_interface(self.iface);
+    }
+
+    /// Vendor control-OUT, host-to-device, device recipient (bmRequestType 0x40),
+    /// no data stage - used to send StartSenser/StopSenser on the still-open MSC
+    /// handle, before the camera re-enumerates under a different PID.
+    pub fn control_out(&self, (req, value, index): (u8, u16, u16)) -> Result<()> {
+        self.handle
+            .write_control(0x40, req, value, index, &[], self.timeout)
+            .map(|_| ())
+            .map_err(|e| Error::Usb(format!("vendor control-out: {e}")))
     }
 }
 

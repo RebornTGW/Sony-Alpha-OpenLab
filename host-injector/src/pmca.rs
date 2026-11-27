@@ -18,7 +18,7 @@
 use serde::Deserialize;
 
 use crate::descriptor::{build_blob, PatchRecord};
-use crate::scsi::{BulkPipe, MscBot};
+use crate::scsi::{BulkPipe, MscBot, UsbPipe};
 use crate::transport::RamTransport;
 use crate::{Error, Result};
 
@@ -404,8 +404,10 @@ pub trait SenserIo {
 }
 
 /// Real rusb-backed `SenserIo`. Opens its own handle (separate from the MSC
-/// `UsbPipe`) by VID/PID, vendor control-OUT via `write_control`, AuthPacket frames
-/// via plain bulk transfers on the given endpoint pair.
+/// `UsbPipe`) by VID/PID, discovers its bulk endpoint pair from the active config
+/// descriptor (same approach `UsbPipe::find_bulk` uses for the MSC interface),
+/// vendor control-OUT via `write_control`, AuthPacket frames via plain bulk
+/// transfers on the discovered pair.
 pub struct RusbSenserIo {
     handle: rusb::DeviceHandle<rusb::GlobalContext>,
     ep_in: u8,
@@ -416,13 +418,66 @@ pub struct RusbSenserIo {
 /// bmRequestType: host-to-device, vendor, device recipient (USB 2.0 Table 9-2).
 const VENDOR_REQUEST_OUT: u8 = 0x40;
 
+/// Pick the first bulk IN + bulk OUT endpoint pair that share an interface, from a
+/// flat list of `(interface_number, transfer_type, direction, address)` tuples.
+/// Pure selection logic, factored out of `RusbSenserIo::find_bulk` so it can be
+/// unit-tested without a real device or a real `ConfigDescriptor`. Ties broken by
+/// lowest interface number, matching `UsbPipe::find_bulk`'s "first that has both".
+fn select_bulk_pair<I>(eps: I) -> Option<(u8, u8, u8)>
+where
+    I: IntoIterator<Item = (u8, rusb::TransferType, rusb::Direction, u8)>,
+{
+    use std::collections::BTreeMap;
+    let mut by_iface: BTreeMap<u8, (Option<u8>, Option<u8>)> = BTreeMap::new();
+    for (iface, tt, dir, addr) in eps {
+        if tt != rusb::TransferType::Bulk {
+            continue;
+        }
+        let slot = by_iface.entry(iface).or_insert((None, None));
+        match dir {
+            rusb::Direction::In if slot.0.is_none() => slot.0 = Some(addr),
+            rusb::Direction::Out if slot.1.is_none() => slot.1 = Some(addr),
+            _ => {}
+        }
+    }
+    for (iface, (ep_in, ep_out)) in by_iface {
+        if let (Some(i), Some(o)) = (ep_in, ep_out) {
+            return Some((iface, i, o));
+        }
+    }
+    None
+}
+
 impl RusbSenserIo {
-    /// Open by VID/PID. `ep_in`/`ep_out` are the senser bulk endpoint addresses
-    /// (e.g. 0x81 / 0x01 for "endpoint 1" IN/OUT) - unverified, see the trait doc.
-    pub fn open(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> Result<Self> {
+    /// Open by VID/PID, discover the bulk endpoint pair, claim that interface.
+    pub fn open(vid: u16, pid: u16) -> Result<Self> {
         let handle = rusb::open_device_with_vid_pid(vid, pid)
             .ok_or_else(|| Error::Usb(format!("no device {vid:04X}:{pid:04X}")))?;
+        let (iface, ep_in, ep_out) = Self::find_bulk(&handle)?;
+        let _ = handle.set_auto_detach_kernel_driver(true);
+        handle
+            .claim_interface(iface)
+            .map_err(|e| Error::Usb(format!("claim interface {iface}: {e}")))?;
         Ok(Self { handle, ep_in, ep_out, timeout: std::time::Duration::from_secs(5) })
+    }
+
+    /// Scan the active config descriptor for the first bulk IN+OUT endpoint pair
+    /// on a shared interface - unverified which interface/endpoints the senser
+    /// protocol actually uses (PMCA-RE's Python never names raw endpoint numbers).
+    fn find_bulk(h: &rusb::DeviceHandle<rusb::GlobalContext>) -> Result<(u8, u8, u8)> {
+        let cfg = h
+            .device()
+            .active_config_descriptor()
+            .map_err(|e| Error::Usb(format!("config descriptor: {e}")))?;
+        let eps = cfg.interfaces().flat_map(|iface| {
+            iface.descriptors().flat_map(|desc| {
+                let ifn = desc.interface_number();
+                desc.endpoint_descriptors()
+                    .map(move |ep| (ifn, ep.transfer_type(), ep.direction(), ep.address()))
+                    .collect::<Vec<_>>()
+            })
+        });
+        select_bulk_pair(eps).ok_or_else(|| Error::Usb("no bulk IN+OUT endpoint pair found".into()))
     }
 }
 
@@ -643,6 +698,28 @@ impl<P: BulkPipe> ServiceLink<P> {
              shell - blocked on enter_service."
                 .into(),
         ))
+    }
+}
+
+/// Real-hardware-only moves that need the concrete `UsbPipe` behind the MSC bulk
+/// pipe: sending a vendor control request on the still-open MSC handle (the
+/// generic `BulkPipe` trait has no control-transfer method), and releasing that
+/// handle's interface claim before the camera re-enumerates under the senser PID.
+impl ServiceLink<UsbPipe> {
+    /// Send a vendor control-OUT request (e.g. `vendor::VREQ_START_SENSER`) on the
+    /// currently-held MSC handle. Still subject to `gate()` - call sites must check
+    /// `allow_unverified` themselves since this bypasses the BulkPipe abstraction.
+    pub fn send_vendor_control(&self, req: (u8, u16, u16)) -> Result<()> {
+        self.gate("send_vendor_control")?;
+        self.bot.pipe().control_out(req)
+    }
+
+    /// Release the MSC handle's interface claim. Call after `send_vendor_control`
+    /// (StartSenser) and before polling for the camera's re-enumeration under the
+    /// senser PID - the exact handoff a real device needs here (does it need the
+    /// handle closed outright, not just released?) is unverified.
+    pub fn release_pipe(&mut self) {
+        self.bot.pipe_mut().release();
     }
 }
 
@@ -988,6 +1065,44 @@ mod tests {
 
         let err = link.enter_service().unwrap_err();
         assert!(matches!(err, Error::Usb(ref s) if s.contains("SHA256")));
+    }
+
+    #[test]
+    fn select_bulk_pair_picks_first_interface_with_both_directions() {
+        use rusb::{Direction, TransferType};
+        // iface 0: IN only (no match); iface 1: bulk IN+OUT (first full match);
+        // iface 2: also bulk IN+OUT, but iface 1 must win (lower number).
+        let eps = vec![
+            (0u8, TransferType::Bulk, Direction::In, 0x82u8),
+            (1u8, TransferType::Interrupt, Direction::In, 0x83u8), // wrong type, ignored
+            (1u8, TransferType::Bulk, Direction::In, 0x81u8),
+            (1u8, TransferType::Bulk, Direction::Out, 0x01u8),
+            (2u8, TransferType::Bulk, Direction::In, 0x85u8),
+            (2u8, TransferType::Bulk, Direction::Out, 0x05u8),
+        ];
+        assert_eq!(select_bulk_pair(eps), Some((1, 0x81, 0x01)));
+    }
+
+    #[test]
+    fn select_bulk_pair_ignores_non_bulk_and_unpaired() {
+        use rusb::{Direction, TransferType};
+        let eps = vec![
+            (0u8, TransferType::Control, Direction::In, 0x80u8),
+            (0u8, TransferType::Bulk, Direction::In, 0x81u8), // no matching OUT anywhere
+        ];
+        assert_eq!(select_bulk_pair(eps), None);
+    }
+
+    #[test]
+    fn select_bulk_pair_keeps_first_address_per_direction() {
+        use rusb::{Direction, TransferType};
+        // Two bulk INs on the same interface: the first one found must win.
+        let eps = vec![
+            (0u8, TransferType::Bulk, Direction::In, 0x81u8),
+            (0u8, TransferType::Bulk, Direction::In, 0x82u8),
+            (0u8, TransferType::Bulk, Direction::Out, 0x01u8),
+        ];
+        assert_eq!(select_bulk_pair(eps), Some((0, 0x81, 0x01)));
     }
 
     #[test]

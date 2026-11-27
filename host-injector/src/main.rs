@@ -175,6 +175,40 @@ fn main() -> ExitCode {
         }
     }
 
+    // Senser re-enumeration lifecycle: StartSenser rides the still-open MSC
+    // handle, then the camera is expected to drop off the bus and come back as
+    // 054C:0336. Gated on --allow-unverified-usb like every other real frame;
+    // the confirm above already covered this run.
+    if allow_unverified {
+        println!("[senser] sending StartSenser on the MSC handle...");
+        if let Err(e) = link.send_vendor_control(opengate_rs::pmca::vendor::VREQ_START_SENSER) {
+            eprintln!("[ERROR] StartSenser: {e}");
+            return ExitCode::FAILURE;
+        }
+        link.release_pipe();
+
+        println!("[senser] waiting for the camera to re-enumerate as 054C:0336 (up to 10s)...");
+        if !wait_for_pid(
+            opengate_rs::usb::SONY_VID,
+            0x0336,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_millis(200),
+        ) {
+            eprintln!("[ERROR] camera did not re-enumerate as 054C:0336 within 10s");
+            return ExitCode::FAILURE;
+        }
+
+        let senser_io = match opengate_rs::pmca::RusbSenserIo::open(opengate_rs::usb::SONY_VID, 0x0336) {
+            Ok(io) => io,
+            Err(e) => {
+                eprintln!("[ERROR] opening senser device: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        link.set_senser_io(Box::new(senser_io));
+        println!("[+] senser transport wired (054C:0336).");
+    }
+
     if let Err(e) = link.enter_service() {
         eprintln!("[ERROR] {e}");
         return ExitCode::FAILURE;
@@ -232,6 +266,25 @@ fn confirm_unverified() -> bool {
     match std::io::stdin().read_line(&mut line) {
         Ok(_) => line.trim().eq_ignore_ascii_case("yes"),
         Err(_) => false,
+    }
+}
+
+/// Poll the USB device list for a VID/PID until it shows up or `timeout` elapses.
+/// Used after StartSenser to wait for the camera's re-enumeration as 054C:0336.
+fn wait_for_pid(vid: u16, pid: u16, timeout: std::time::Duration, interval: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        let found = rusb::devices().ok().is_some_and(|list| {
+            list.iter()
+                .any(|d| d.device_descriptor().is_ok_and(|desc| desc.vendor_id() == vid && desc.product_id() == pid))
+        });
+        if found {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(interval);
     }
 }
 
