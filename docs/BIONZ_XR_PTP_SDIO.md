@@ -9,14 +9,17 @@ vendor extension are protocol constants, not firmware content.
 > ⚠️ **A note on the numbers in this document.** Every figure below is the one
 > actually **observed live** on our test unit (see
 > [`docs/RESULTS.en.md`](RESULTS.en.md) and the commit history of
-> `probe_a6700.py`). A few counts we were asked to publish in an earlier draft
-> of this page — "77 supported operations / 58 Sony `0x92xx` opcodes / 45
-> events / 351 decoded properties" — do **not** match what the camera actually
-> reports and have been left out rather than printed as fact. If you capture a
-> `GetDeviceInfo` + `GetAllExtDevicePropInfo` dump that shows different counts
-> (different firmware, different camera mode, a different body entirely),
-> that's a real data point — open an issue with the `--dump-bin` output
-> attached and we'll update this table.
+> `probe_a6700.py` / `sdio_probe.py`). An earlier draft of this page said a
+> "351 decoded properties" / "dual Supported+Available enum list" claim
+> didn't match what we could verify — that was true *at the time*: the file
+> we had couldn't be parsed under any layout tried. It's since been
+> re-verified properly: a live re-capture, cross-referenced record-by-record
+> against the independently-decoded `SDIO_GetExtDeviceInfo (0x9202)`
+> property-code list, confirms **351 properties and the dual-list shape are
+> both real** — see §2.3. The `77` total ops / `58` vendor-`0x92xx`-only /
+> `45` events split from that same earlier draft is still unconfirmed (our
+> own capture says `61` vendor `0x92xx` opcodes, see §2.2) and is left out
+> until it's checked the same way.
 
 ## 1. Why BIONZ X (`054C:0E76`, `VREQ_START_SENSER`) stalls on a BIONZ XR body
 
@@ -61,8 +64,13 @@ SDIO_GetExtDeviceInfo(0x9202, [0x012C])
   -> OK, ~826 bytes
 SDIO_Connect(0x9201, [3,0,0])   -> OK, 8-byte DATA phase
 SDIO_GetAllExtDevicePropInfo(0x9209, [0,0])
-  -> OK, ~8019 bytes, 122 active property records (Video mode)
+  -> OK, 9731 bytes, 351 property records (re-confirmed live, see §2.3)
 ```
+
+An earlier capture in a different camera mode read ~8019 bytes / 122 active
+properties instead — the handshake and opcodes are identical either way;
+only the property count moves with however many properties the camera's
+current mode exposes.
 
 \* `GetDeviceInfo` and `SDIO_GetExtDeviceInfo` land on close to the same byte
 count on our unit; they are two different datasets (standard PTP vs. the Sony
@@ -86,8 +94,26 @@ seeing garbage on the next transaction.
 
 ### 2.3 The `0x9209` property-record format (what `sdio_probe.py` decodes)
 
-Each record in the flat `GetAllExtDevicePropInfo` stream is, byte for byte,
-as verified against a live capture:
+**How this was actually verified, not just asserted:** `SDIO_GetExtDeviceInfo
+(0x9202)` turns out to hold two flat arrays — `version(u16)=0x012C`,
+`count1(u16)=351`, `reserved(u16)=0`, `[351 DevicePropCodes]`,
+`count2(u16)=57`, `reserved(u16)=0`, `[57 control/trigger codes]` — exactly
+`6 + 351×2 + 2 + 2 + 57×2 = 826` bytes, no leftover. That 351-code list is in
+the *same order* the properties appear in `0x9209`. Walking `0x9209` and
+finding each of those known codes in sequence pins down every record's exact
+start and end **without assuming a field layout** — and three records of
+three different shapes (none / range / enum) each decoded with **zero
+leftover bytes** once the layout below was tried. That's the confirmation,
+not a guess that happened to not crash.
+
+**`0x9209` stream header**, 8 bytes before the first record:
+
+```
+count       u32   total property records (351 on our unit)
+reserved    u32   0 on every capture so far
+```
+
+**Each record**, verified live (SDK version `0x012C`, i.e. SDIO v300):
 
 ```
 code        u16   DevicePropCode (e.g. 0xD211 aspect_ratio)
@@ -97,38 +123,30 @@ type        u16   PTP datatype (0x0001..0x0008 int/uint, 0xFFFF = UTF-16LE
 getset      u8    0 = Get only, 1 = Get/Set
 enable      u8    IsEnable flag (whether the property is currently exposed
                    in the camera's present mode)
-(extra)     u8    one Sony-specific byte with no effect observed on decode;
-                   skipped. Without it every multi-byte enum (e.g.
-                   still_capture_mode's 26-entry list) comes out misaligned.
-default     DTS   FactoryDefault, as `type`
+default     DTS   FactoryDefault, as `type` — directly after `enable`, no
+                   padding byte (that padding is a v200 quirk, see below)
 current     DTS   CurrentValue, as `type`
 form        u8    0x00 none, 0x01 range, 0x02 enum
   [range]         min, max, step — all as `type`
-  [enum]          u16 count + count × `type` — the **Supported** values list
+  [enum]          u16 count1 + count1 × `type`  ("Supported" values)
+                  u16 count2 + count2 × `type`  ("Available" values —
+                  confirmed real: on a live capture, 0xD211 aspect_ratio
+                  decodes as Supported=[1,3,2,4], Available=[1,3,2,4],
+                  current=2, the record ending exactly where the next known
+                  code begins)
 ```
 
-That is the structure `sdio_probe.parse_ext_device_prop_record` decodes, and
-it is the **only** structure confirmed on real hardware so far: every record
-in a live `0x9209` capture round-trips cleanly reading exactly one enum list
-per record, nothing more.
-
-**On the "dual Supported+Available enum list" idea.** We were asked to
-document and implement a `form == 0x02` variant with a *second* trailing
-list — a per-property "currently available" subset on top of the "supported"
-one. That shape is plausible (some SDK-level Sony tooling exposes a similar
-concept), but nothing in our own captures shows it, and parsing a list that
-isn't actually there would silently corrupt every record after it in the
-stream. `sdio_probe.py` implements it anyway, strictly **opt-in**
-(`--assume-dual-enum`) and clearly marked unverified in its own docstring —
-pointing it at a real dump and comparing `--parse-bin` output with and without
-the flag is the way to find out whether a given firmware actually has it, not
-asserting that it does.
+This is `sdio_probe.parse_ext_device_prop_record`'s default behavior. The
+**older SDIO v200** dataset (SDK version `0x00C8`) uses a different shape —
+one padding byte between `enable` and `default`, and only a *single* enum
+list, no stream header before the first record — reachable with
+`sdio_probe.py`'s `--single-enum` flag for an older dump.
 
 ### 2.4 `0xD211` aspect_ratio — the property this project cares about
 
-`Get/Set`, `enabled=1`, form **none** (plain `UINT16`, no enum on this body —
-*not* a form-0x02 enum property, despite aspect ratio reading like a natural
-fit for one).
+`Get/Set`, `enabled=1`, `UINT8`, form **enum** — Supported=`[1,3,2,4]`,
+Available=`[1,3,2,4]` on our unit (see §2.3; values `3` and `4` have not
+been identified by name).
 
 | Mode | `CurrentValue` |
 |---|---|
@@ -185,6 +203,9 @@ python scripts/probe_a6700_sdio.py --parse-bin a6700_200_video.bin --verbose
 
 # Export the decoded property map as JSON.
 python scripts/probe_a6700_sdio.py --parse-bin a6700_200_video.bin --json props.json
+
+# An older SDIO v200 (SDK 0x00C8) dump instead of v300 (see §2.3):
+python scripts/probe_a6700_sdio.py --parse-bin legacy_v200.bin --single-enum
 ```
 
 Strictly read-only: the only opcodes ever sent are OpenSession, CloseSession,

@@ -15,6 +15,15 @@ does not have:
       capture with someone who doesn't have the hardware;
     - `--json` to export the decoded property map.
 
+The default decoder targets SDIO v300 (SDK version 0x012C): an 8-byte
+stream header (count + reserved, both u32) followed by records with no
+padding byte and, on a form=0x02 (enum) property, two back-to-back lists
+("Supported" then "Available"). Verified live by cross-referencing the
+ordered property-code list from SDIO_GetExtDeviceInfo (0x9202) against
+GetAllExtDevicePropInfo (0x9209): every record boundary found that way
+decoded with zero leftover bytes. `--single-enum` switches to the older
+SDIO v200 shape (SDK 0x00C8) instead. See docs/BIONZ_XR_PTP_SDIO.md.
+
 Reuses `probe_a6700.py`'s PTP/USB transport (`PtpUsbDevice`) and dataset
 helpers (`parse_device_info`, PTP string/array readers) rather than
 duplicating them. The USB vendor ID, container framing, and the Sony SDIO
@@ -133,31 +142,40 @@ def _read_dpv(buf: bytes, off: int, dtype: int):
     return vals, off
 
 
-def parse_ext_device_prop_record(data: bytes, off: int = 0, assume_dual_enum: bool = False):
+def parse_ext_device_prop_record(data: bytes, off: int = 0, single_enum: bool = False):
     """Decode one Sony SDIO v300 DevicePropDesc record starting at `off`.
 
-    Verified-on-hardware layout (see docs/BIONZ_XR_PTP_SDIO.md, same as
-    probe_a6700.parse_dpd): code(2) type(2) GetSet(1) Enable(1) extra(1)
-    FactoryDefault(DTS) CurrentValue(DTS) FormFlag(1) [form].
+    Verified live on the A6700 (firmware 2.00, SDK version 0x012C) by
+    cross-referencing the ordered property-code list from
+    SDIO_GetExtDeviceInfo (0x9202) against GetAllExtDevicePropInfo (0x9209):
+    every record boundary found that way decoded with **zero leftover
+    bytes**, for three records of three different shapes (none/range/enum).
+    See docs/BIONZ_XR_PTP_SDIO.md.
+
+    Layout (v300, default): code(2) type(2) GetSet(1) Enable(1)
+    FactoryDefault(DTS) CurrentValue(DTS) FormFlag(1) [form]. No padding
+    byte between Enable and FactoryDefault - that extra byte is a quirk of
+    the *older* SDIO v200 dataset (SDK version 0x00C8), not this one.
 
     form == 0x01 (Range): min, max, step (DTS each).
-    form == 0x02 (Enum): u16 count + count x DTS - a *single* "Supported
-      values" list. This is the structure actually observed live on the
-      A6700 (firmware 2.00); every entry decoded so far round-trips cleanly
-      with only one list.
+    form == 0x02 (Enum, v300): u16 count + count x DTS ("Supported" values),
+      followed immediately by a *second* u16 count + count x DTS
+      ("Available" values, the camera-state-dependent subset of Supported).
+      Confirmed live: e.g. 0xD211 aspect_ratio decodes as
+      Supported=[1,3,2,4], Available=[1,3,2,4], current=2, with the record
+      ending exactly at the next known property code - nothing unaccounted
+      for.
 
-    `assume_dual_enum=True` additionally tries to read a second u16-count
-    list right after the first one, as a camera-reported "Available right
-    now" subset of the supported values. *This second list is NOT confirmed
-    on real hardware* - it is here only so the decoder can be pointed at a
-    dump and checked, not because we have verified it exists. Off by
-    default; turning it on can misalign every record that follows if the
-    stream does not actually contain it, so always re-check with
-    `--parse-bin` against a known-good dump before trusting the result.
+    `single_enum=True` switches to the **legacy SDIO v200** shape instead
+    (SDK version 0x00C8): the extra padding byte after Enable, and only a
+    *single* enum list (no Available list). Use this for an older dump; it
+    is not the default because 0x012C - what every live capture in this
+    project actually negotiates - uses the v300 shape above.
 
     Returns (record_dict, next_offset) or raises SdioDecodeError.
     """
-    if off + 7 > len(data):
+    header_len = 7 if single_enum else 6
+    if off + header_len > len(data):
         raise SdioDecodeError("truncated record header")
     code = struct.unpack_from("<H", data, off)[0]
     dtype = struct.unpack_from("<H", data, off + 2)[0]
@@ -166,7 +184,7 @@ def parse_ext_device_prop_record(data: bytes, off: int = 0, assume_dual_enum: bo
         raise SdioDecodeError(f"unknown base dtype 0x{base:04X} at offset {off}")
     getset = data[off + 4]
     enabled = data[off + 5]
-    p = off + 7  # skip the Sony extra byte at off+6 (verified live, see parse_dpd)
+    p = off + header_len  # v300: no padding; v200 (single_enum): skip extra byte at off+6
 
     default, p = _read_dpv(data, p, dtype)
     current, p = _read_dpv(data, p, dtype)
@@ -205,36 +223,46 @@ def parse_ext_device_prop_record(data: bytes, off: int = 0, assume_dual_enum: bo
             v, p = _read_dpv(data, p, dtype)
             values.append(v)
         record["enum"] = values
-        if assume_dual_enum and p + 2 <= len(data):
+        if not single_enum:
+            # v300: a second "Available" list always follows the first.
+            if p + 2 > len(data):
+                raise SdioDecodeError("truncated available-list count")
             n2 = struct.unpack_from("<H", data, p)[0]
-            # Sanity bound: refuse a count that would obviously run past the
-            # buffer, rather than silently corrupting every later record.
-            avail_size = n2 * (1 if dtype == 0xFFFF else PTP_BASE_TYPES.get(base, ("", 1))[1])
-            if 0 < n2 <= 4096 and p + 2 + avail_size <= len(data):
-                p2 = p + 2
-                avail = []
-                for _ in range(n2):
-                    v, p2 = _read_dpv(data, p2, dtype)
-                    avail.append(v)
-                record["available"] = avail
-                p = p2
+            p += 2
+            avail = []
+            for _ in range(n2):
+                v, p = _read_dpv(data, p, dtype)
+                avail.append(v)
+            record["available"] = avail
     elif form != FORM_NONE:
         raise SdioDecodeError(f"unknown form flag 0x{form:02X} at offset {off}")
 
     return record, p
 
 
-def parse_all_ext_prop_info(data: bytes, assume_dual_enum: bool = False) -> list:
+def parse_all_ext_prop_info(data: bytes, single_enum: bool = False) -> list:
     """Decode the full GetAllExtDevicePropInfo (0x9209) stream into a list of
-    record dicts (see `parse_ext_device_prop_record`). Stops cleanly - and
-    keeps every record decoded so far - the moment a record fails to parse,
-    rather than raising, since a stream captured from a different firmware
-    or camera mode may end differently than ours."""
+    record dicts (see `parse_ext_device_prop_record`).
+
+    v300 (default): the stream starts with an 8-byte header - count(u32) +
+    reserved(u32, always 0 on every live capture so far) - before the first
+    record. `single_enum=True` (legacy v200) has no such header; records
+    start at offset 0.
+
+    Stops cleanly - and keeps every record decoded so far - the moment a
+    record fails to parse, rather than raising, since a stream captured
+    from a different firmware or camera mode may end differently than ours.
+    """
+    if single_enum:
+        off = 0
+    else:
+        if len(data) < 8:
+            return []
+        off = 8
     records = []
-    off = 0
     while off < len(data):
         try:
-            record, off = parse_ext_device_prop_record(data, off, assume_dual_enum)
+            record, off = parse_ext_device_prop_record(data, off, single_enum)
         except SdioDecodeError:
             break
         records.append(record)
@@ -368,10 +396,12 @@ def main():
                           "No camera/USB needed.")
     ap.add_argument("--json", metavar="PATH",
                      help="Export the decoded property map as JSON to PATH.")
-    ap.add_argument("--assume-dual-enum", action="store_true",
-                     help="Try to also read a second 'Available' enum list "
-                          "per property. NOT verified on real hardware - see "
-                          "the module docstring. Off by default.")
+    ap.add_argument("--single-enum", action="store_true",
+                     help="Decode as legacy SDIO v200 (SDK 0x00C8): no stream "
+                          "header, extra padding byte per record, single "
+                          "enum list. Default is v300 (SDK 0x012C, dual "
+                          "Supported+Available list) - what every live "
+                          "capture in this project actually negotiates.")
     ap.add_argument("--verbose", "-v", action="store_true",
                      help="Print every decoded record, not just the video ones.")
     args = ap.parse_args()
@@ -397,7 +427,7 @@ def main():
                 fh.write(raw)
             print(f"[+] Saved {len(raw)} bytes to {args.dump_bin}")
 
-    records = parse_all_ext_prop_info(raw, assume_dual_enum=args.assume_dual_enum)
+    records = parse_all_ext_prop_info(raw, single_enum=args.single_enum)
     _print_report(records, verbose=args.verbose)
 
     if args.json:
