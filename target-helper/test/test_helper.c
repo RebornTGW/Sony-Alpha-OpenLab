@@ -91,6 +91,37 @@ int main(void) {
         CHECK(r == OG_ERR_MAGIC, "bad magic -> OG_ERR_MAGIC");
     }
 
+    /* --- test 5: og_toggle()/og_rollback() over the cached session ---
+     * The toggle cache is process-global static state, populated once by the
+     * very first successful og_apply() (test 1, above) - a real single-session
+     * helper never resets mid-run, so this is the faithful way to test it:
+     * continue straight from test 1's two records (BASE+16 len 4 data,
+     * BASE+128 len 2 code), which test 2's mem reset left holding their
+     * original stock bytes again (0x10.. / 0x80..) even though the cached
+     * mode is still OPENGATE from test 1 - og_toggle() below proves it by
+     * actually writing + reading back, not by coincidence. */
+    {
+        CHECK(og_current_mode() == OG_MODE_OPENGATE, "toggle: mode is OPENGATE right after test 1's apply");
+
+        int r = og_toggle();
+        CHECK(r == OG_OK, "toggle: og_apply -> og_toggle() (OPENGATE -> STOCK) succeeds");
+        CHECK(og_current_mode() == OG_MODE_STOCK, "toggle: mode is STOCK after first toggle");
+        CHECK(mem[16] == 0x10 && mem[19] == 0x13, "toggle: record 0 reverted to stock 16:9 bytes");
+        CHECK(mem[128] == 0x80 && mem[129] == 0x81, "toggle: record 1 reverted to stock 16:9 bytes");
+
+        r = og_toggle();
+        CHECK(r == OG_OK, "toggle: second og_toggle() (STOCK -> OPENGATE) succeeds");
+        CHECK(og_current_mode() == OG_MODE_OPENGATE, "toggle: mode is OPENGATE after second toggle");
+        CHECK(mem[16] == 0x00 && mem[19] == 0x0a, "toggle: record 0 restored to 3:2 Open Gate bytes");
+        CHECK(mem[128] == 0xde && mem[129] == 0xad, "toggle: record 1 restored to 3:2 Open Gate bytes");
+
+        r = og_rollback();
+        CHECK(r == OG_OK, "toggle: og_rollback() succeeds");
+        CHECK(og_current_mode() == OG_MODE_STOCK, "toggle: mode is STOCK after og_rollback()");
+        CHECK(mem[16] == 0x10 && mem[19] == 0x13, "toggle: og_rollback() restored record 0's stock bytes");
+        CHECK(mem[128] == 0x80 && mem[129] == 0x81, "toggle: og_rollback() restored record 1's stock bytes");
+    }
+
     printf(fails ? "\nFAILED (%d)\n" : "\nOK\n", fails);
     return fails ? 1 : 0;
 }

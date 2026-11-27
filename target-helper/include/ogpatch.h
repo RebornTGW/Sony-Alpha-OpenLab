@@ -45,7 +45,8 @@ enum {
     OG_ERR_TRUNCATED = -2,   /* a record runs past the blob end */
     OG_ERR_RANGE     = -3,   /* vaddr/len outside the mapped window */
     OG_ERR_STOCK     = -4,   /* current bytes != expected stock (abort, no write) */
-    OG_ERR_READBACK  = -5    /* post-write readback != target */
+    OG_ERR_READBACK  = -5,   /* post-write readback != target */
+    OG_ERR_NOT_CACHED = -6   /* og_toggle()/og_rollback() before any og_apply() cached */
 };
 
 /* A linear mapping of [base_vaddr, base_vaddr + size) onto `base`.
@@ -79,5 +80,42 @@ static inline uint32_t og_result_index(int r) { return (uint32_t)((-r) >> 3); }
  * freshly written code region [start, start+len). Portable fallback uses the
  * compiler builtin. Exposed for callers that stage code writes themselves. */
 void og_clear_icache(void *start, size_t len);
+
+/* ---- stateful toggle: swap between stock and Open Gate without re-parsing -- */
+
+/* Records up to this many of a successful og_apply()'s writes, each up to this
+ * many bytes, in static state - no heap, matches the freestanding build. A
+ * record over OG_TOGGLE_MAX_LEN, or past the OG_TOGGLE_MAX_RECORDS'th one, is
+ * simply not cached: og_apply()'s own return value is unaffected either way,
+ * only how much og_toggle()/og_rollback() can later swap. Sized for the small
+ * 4-byte geometry words (L13/L16/S16-style writes); the much larger
+ * firmware-derived payload records (e.g. M19's encoder blob) are out of scope
+ * for toggling and are left for the host's own RAII rollback. */
+#define OG_TOGGLE_MAX_RECORDS 16u
+#define OG_TOGGLE_MAX_LEN     OG_LINE
+
+typedef enum {
+    OG_MODE_STOCK    = 0,   /* every cached record currently holds its stock bytes */
+    OG_MODE_OPENGATE = 1    /* every cached record currently holds its target bytes */
+} og_mode;
+
+/* Which mode the cached session is in. OG_MODE_STOCK before any og_apply() has
+ * cached a session (nothing to toggle yet, but a harmless default to read). */
+og_mode og_current_mode(void);
+
+/* Flip every cached record: OPENGATE -> write stock, or STOCK -> write target.
+ * Unlike og_apply(), this does NOT re-verify the current bytes against the
+ * mode being left first - the table was already proven correct by the initial
+ * og_apply(), so this only writes + reads back against the mode being entered.
+ * Returns OG_OK, or OG_ERR_NOT_CACHED (no session cached yet) /
+ * OG_ERR_READBACK (first record whose readback didn't match, index via
+ * og_result_index(); the records before it in iteration order are already
+ * flipped - same "no self-rollback, caller decides" contract as og_apply()). */
+int og_toggle(void);
+
+/* Force every cached record back to its stock bytes, regardless of the
+ * current mode (idempotent if already OG_MODE_STOCK). Same contract as
+ * og_toggle(): OG_OK, OG_ERR_NOT_CACHED, or OG_ERR_READBACK + index. */
+int og_rollback(void);
 
 #endif /* OGPATCH_H */

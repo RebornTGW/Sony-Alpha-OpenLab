@@ -46,9 +46,24 @@ Full layout is documented at the top of [`include/ogpatch.h`](include/ogpatch.h)
 The host crate [`../host-injector`](../host-injector) emits this blob from the JSON
 profiles.
 
+## Stateful toggle (`og_toggle`, `og_current_mode`, `og_rollback`)
+
+A successful `og_apply()` caches its records (up to `OG_TOGGLE_MAX_RECORDS`, each up
+to `OG_TOGGLE_MAX_LEN` bytes — sized for small geometry words like L13/L16/S16, not
+the much larger encoder payload) in static state. `og_toggle()` then flips every
+cached record between its stock and target bytes — write + i-cache/d-cache flush +
+readback, same as `og_apply()`, but **without** re-checking the current bytes against
+the mode being left first (the table was already proven correct by that initial
+apply). `og_current_mode()` reports which side it's on (`OG_MODE_STOCK` /
+`OG_MODE_OPENGATE`); `og_rollback()` forces it back to stock regardless of the
+current mode. Still per-record readback-verified: a failed toggle returns
+`OG_ERR_READBACK` + the failing index, same encoding as `og_apply()`.
+
 ## Safety
 
 The helper refuses any record whose current bytes do not match the expected stock
 (`OG_ERR_STOCK`, nothing written) and reports the failing record index. It never
-rolls back on its own — the host keeps the stock bytes and drives rollback. RAM only:
-a cold boot (battery out ~10 s) reverts everything.
+rolls back **a failed `og_apply()`** on its own — the host keeps the stock bytes and
+drives that rollback. `og_rollback()` is a different thing: an explicit, always-
+available revert of whatever session `og_apply()` already cached. RAM only: a cold
+boot (battery out ~10 s) reverts everything regardless.
