@@ -1,5 +1,5 @@
 # ==========================================================================
-# Sony-Alpha-OpenLab — .gitignore STRICT
+# Sony-Open-Gate-Lab — .gitignore STRICT
 # Ce dépôt ne doit JAMAIS contenir de fichiers extraits du firmware Sony.
 # Les binaires propriétaires (firmware, bibliothèques, images) sont exclus.
 # ==========================================================================
@@ -73,3 +73,15 @@ zig-cache/
 target-helper/build/
 
 senser_blobs.json
+
+# --- proofs/ workspace: research notes + reddit_drafts.md stay tracked;
+# raw video/binary capture material (screen recordings, MediaInfo exports,
+# hardware-test binaries) never does - too large for Git, and may touch
+# real captured footage. *.bin here is already covered by the repo-wide
+# rule above; kept explicit for anyone grepping this file for proofs/-
+# specific exclusions. ---
+proofs/videos/
+proofs/**/*.mp4
+proofs/**/*.MOV
+proofs/**/*.mov
+proofs/**/*.bin
