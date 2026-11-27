@@ -144,6 +144,21 @@ the project's volatile-RAM Open Gate research (`host-injector`,
 trying to find a magic property write — the lock is enforced one layer above
 where any PTP property write can reach.
 
+### 2.4bis Cross-check against `CAMSETxx.DAT` (SD card settings profiles)
+
+A separate, card-level research pass diffed saved settings profiles
+(`CAMSETxx.DAT`, written by *Menu → Setup → Setting Option → Save/Load
+Settings → Save*) between Photo 3:2 and Photo 16:9. It found a byte at
+offset `0x1493` that flips `0x00` ↔ `0x02` across exactly that change —
+*correlated* with, but not a confirmed direct mirror of, the `0xD211`
+`aspect_ratio` values (`1`/`2`) seen live over PTP above: the two don't share
+the same raw encoding (`0x00`/`0x02` on the card vs. `1`/`2` over PTP), and
+the card-side offset has not been independently re-verified in this session
+the way the PTP handshake has. See
+[`docs/BIONZ_XR_SD_CAMSET.md`](BIONZ_XR_SD_CAMSET.md) for the full writeup,
+the `CAMSETxx.DAT` binary layout, and why its trailer checksum blocks any
+write-back for now.
+
 ### 2.5 `0xD241` / `0xD242` — movie format/quality stay inside 16:9
 
 `0xD241 file_format_movie` and `0xD242 recording_setting_movie` both return an
@@ -179,6 +194,9 @@ SDIO_GetAllExtDevicePropInfo — see `probe_a6700.READ_ONLY_OPS`, which
 
 ## See also
 
+- [`docs/BIONZ_XR_SD_CAMSET.md`](BIONZ_XR_SD_CAMSET.md) — the SD card
+  layout and `CAMSETxx.DAT` settings-profile findings this page's §2.4bis
+  cross-checks `0xD211` against.
 - [`probe_a6700.py`](../probe_a6700.py) — the original live-handshake probe
   this module reuses the transport and dataset parsers from.
 - [`docs/RESULTS.en.md`](RESULTS.en.md) — the multi-exposure success and the
