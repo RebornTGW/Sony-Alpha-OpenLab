@@ -26,7 +26,9 @@ OPTIONS:\n\
   --video-standard NTSC|PAL   preflight: body TV standard\n\
   --dial MOVIE|STILL          preflight: mode-dial position\n\
   --profiles-dir DIR      where to find the JSON profiles (default: ../profiles)\n\
-  --allow-unverified-usb  send real (unverified) vendor frames; asks to confirm\n"
+  --allow-unverified-usb  send real (unverified) vendor frames; asks to confirm\n\
+  --senser-config PATH    Senser key tables, JSON {{\"sha1\":[...],\"sha256\":[...]}}\n\
+                          (3 hex strings each); also read from OG_SENSER_CONFIG\n"
     );
 }
 
@@ -41,6 +43,7 @@ fn main() -> ExitCode {
     let mut vs: Option<VideoStd> = None;
     let mut dial: Option<Dial> = None;
     let mut allow_unverified = false;
+    let mut senser_config: Option<PathBuf> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -54,6 +57,15 @@ fn main() -> ExitCode {
             "--verify-only" => verify_only = true,
             "--confirm-ram-write" => confirm = true,
             "--allow-unverified-usb" => allow_unverified = true,
+            "--senser-config" => {
+                senser_config = match it.next() {
+                    Some(p) => Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--senser-config needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
             "--video-standard" => {
                 vs = match it.next().map(|s| s.to_ascii_uppercase()).as_deref() {
                     Some("NTSC") => Some(VideoStd::Ntsc),
@@ -144,6 +156,23 @@ fn main() -> ExitCode {
         }
         link.set_allow_unverified(true);
         println!("[warn ] unverified USB vendor frames ENABLED for this run.");
+    }
+
+    let senser_config = senser_config.or_else(|| std::env::var("OG_SENSER_CONFIG").ok().map(PathBuf::from));
+    if let Some(path) = &senser_config {
+        match opengate_rs::pmca::load_senser_keys_json(path) {
+            Ok(keys) => match link.set_senser_keys(keys) {
+                Ok(()) => println!("[+] loaded senser key tables from {}", path.display()),
+                Err(e) => {
+                    eprintln!("[ERROR] senser keys: {e}");
+                    return ExitCode::FAILURE;
+                }
+            },
+            Err(e) => {
+                eprintln!("[ERROR] senser config {}: {e}", path.display());
+                return ExitCode::FAILURE;
+            }
+        }
     }
 
     if let Err(e) = link.enter_service() {

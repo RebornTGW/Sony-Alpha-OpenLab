@@ -15,6 +15,8 @@
 //! no `ShellExec` opcode in PMCA-RE: a binary runs via the `SHEL` interactive relay.
 //! No fabricated vendor bytes are ever put on the wire.
 
+use serde::Deserialize;
+
 use crate::descriptor::{build_blob, PatchRecord};
 use crate::scsi::{BulkPipe, MscBot};
 use crate::transport::RamTransport;
@@ -340,11 +342,107 @@ pub struct SenserKeys {
     pub sha256: [Vec<u8>; 3],
 }
 
+/// On-disk shape of `--senser-config` / `OG_SENSER_CONFIG`: hex strings, 3 per hash.
+#[derive(Deserialize)]
+struct SenserConfigFile {
+    sha1: Vec<String>,
+    sha256: Vec<String>,
+}
+
+fn decode_hex_triplet(name: &str, v: &[String]) -> Result<[Vec<u8>; 3]> {
+    if v.len() != 3 {
+        return Err(Error::Parse(format!("senser config: {name} needs 3 entries, got {}", v.len())));
+    }
+    let mut out: [Vec<u8>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+    for (i, slot) in out.iter_mut().enumerate() {
+        *slot = crate::parse_hex_bytes(&v[i])
+            .map_err(|e| Error::Parse(format!("senser config: {name}[{i}]: {e}")))?;
+    }
+    Ok(out)
+}
+
+/// Parse a `--senser-config` JSON document: `{"sha1": ["hex", ...], "sha256": [...]}`,
+/// 3 hex strings per hash. Each decoded blob is checked by `set_senser_keys()` against
+/// the cited first-8-byte fingerprints before it is stored.
+pub fn parse_senser_keys_json(text: &str) -> Result<SenserKeys> {
+    let cfg: SenserConfigFile =
+        serde_json::from_str(text).map_err(|e| Error::Parse(format!("senser config: {e}")))?;
+    Ok(SenserKeys {
+        sha1: decode_hex_triplet("sha1", &cfg.sha1)?,
+        sha256: decode_hex_triplet("sha256", &cfg.sha256)?,
+    })
+}
+
+/// Load and parse a `--senser-config` file from disk.
+pub fn load_senser_keys_json(path: &std::path::Path) -> Result<SenserKeys> {
+    let text = std::fs::read_to_string(path).map_err(|e| Error::Io(format!("{}: {e}", path.display())))?;
+    parse_senser_keys_json(&text)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     MassStorage,
     ServiceMode,
     HelperLoaded,
+}
+
+/// Senser control + bulk transport: the vendor control request (StartSenser /
+/// StopSenser) plus the bulk pair the AuthPacket exchange rides on, separate from
+/// the MSC `BulkPipe`. Implemented for real over rusb (`RusbSenserIo`); a scripted
+/// mock drives the unit tests. PMCA-RE's Python never names raw endpoint numbers
+/// for this path ("the ep1 terminal") - the real impl's endpoint addresses are a
+/// best-effort guess, flagged UNVERIFIED same as everything else gated by
+/// `VENDOR_PROTOCOL_VERIFIED`.
+pub trait SenserIo {
+    /// `SONY_VendorRequest_{Start,Stop}Senser`: vendor control-OUT, no data stage,
+    /// as (bRequest, wValue, wIndex).
+    fn control_out(&mut self, req: (u8, u16, u16)) -> Result<()>;
+    /// One AuthPacket frame out (516 bytes, see `auth_packet`).
+    fn bulk_out(&mut self, data: &[u8]) -> Result<usize>;
+    /// One AuthPacket reply in (516 bytes expected).
+    fn bulk_in(&mut self, buf: &mut [u8]) -> Result<usize>;
+}
+
+/// Real rusb-backed `SenserIo`. Opens its own handle (separate from the MSC
+/// `UsbPipe`) by VID/PID, vendor control-OUT via `write_control`, AuthPacket frames
+/// via plain bulk transfers on the given endpoint pair.
+pub struct RusbSenserIo {
+    handle: rusb::DeviceHandle<rusb::GlobalContext>,
+    ep_in: u8,
+    ep_out: u8,
+    timeout: std::time::Duration,
+}
+
+/// bmRequestType: host-to-device, vendor, device recipient (USB 2.0 Table 9-2).
+const VENDOR_REQUEST_OUT: u8 = 0x40;
+
+impl RusbSenserIo {
+    /// Open by VID/PID. `ep_in`/`ep_out` are the senser bulk endpoint addresses
+    /// (e.g. 0x81 / 0x01 for "endpoint 1" IN/OUT) - unverified, see the trait doc.
+    pub fn open(vid: u16, pid: u16, ep_in: u8, ep_out: u8) -> Result<Self> {
+        let handle = rusb::open_device_with_vid_pid(vid, pid)
+            .ok_or_else(|| Error::Usb(format!("no device {vid:04X}:{pid:04X}")))?;
+        Ok(Self { handle, ep_in, ep_out, timeout: std::time::Duration::from_secs(5) })
+    }
+}
+
+impl SenserIo for RusbSenserIo {
+    fn control_out(&mut self, (req, value, index): (u8, u16, u16)) -> Result<()> {
+        self.handle
+            .write_control(VENDOR_REQUEST_OUT, req, value, index, &[], self.timeout)
+            .map(|_| ())
+            .map_err(|e| Error::Usb(format!("senser control-out: {e}")))
+    }
+    fn bulk_out(&mut self, data: &[u8]) -> Result<usize> {
+        self.handle
+            .write_bulk(self.ep_out, data, self.timeout)
+            .map_err(|e| Error::Usb(format!("senser bulk out: {e}")))
+    }
+    fn bulk_in(&mut self, buf: &mut [u8]) -> Result<usize> {
+        self.handle
+            .read_bulk(self.ep_in, buf, self.timeout)
+            .map_err(|e| Error::Usb(format!("senser bulk in: {e}")))
+    }
 }
 
 /// A single held USB session: Mass Storage -> service mode -> helper -> RAM ops.
@@ -353,11 +451,24 @@ pub struct ServiceLink<P: BulkPipe> {
     pub state: LinkState,
     allow_unverified: bool,
     keys: Option<SenserKeys>,
+    senser_io: Option<Box<dyn SenserIo>>,
 }
 
 impl<P: BulkPipe> ServiceLink<P> {
     pub fn new(bot: MscBot<P>) -> Self {
-        Self { bot, state: LinkState::MassStorage, allow_unverified: false, keys: None }
+        Self {
+            bot,
+            state: LinkState::MassStorage,
+            allow_unverified: false,
+            keys: None,
+            senser_io: None,
+        }
+    }
+
+    /// Wire the Senser control+bulk transport `enter_service()` drives. Real
+    /// hardware uses `RusbSenserIo`; tests pass a scripted mock.
+    pub fn set_senser_io(&mut self, io: Box<dyn SenserIo>) {
+        self.senser_io = Some(io);
     }
 
     /// Let a tester send real vendor frames without recompiling (CLI
@@ -406,31 +517,79 @@ impl<P: BulkPipe> ServiceLink<P> {
         Ok(())
     }
 
-    /// Step 2: enter service (senser) mode. Framing is modelled (AuthPacket, the
-    /// 3-round challenge/response from SonySenserAuthDevice.authenticate), but the
-    /// round keys and the SHA1-path hash are external (see EXTERNAL in `vendor`).
+    /// Step 2: enter service (senser) mode. Drives the 3-round challenge/response
+    /// from SonySenserAuthDevice.authenticate over the wired `SenserIo`. Only the
+    /// SHA1 challenge path's response body is cited (`senser_response_sha1`); a
+    /// SHA256 challenge is refused rather than guessed.
     pub fn enter_service(&mut self) -> Result<()> {
         self.gate("enter_service")?;
-        if self.keys.is_none() {
-            return Err(Error::Usb(
+        let keys = self.keys.as_ref().ok_or_else(|| {
+            Error::Usb(
                 "enter_service: Senser key tables not loaded. Copy senserKeysSha1 / \
-                 senserKeysSha256 from pmca/usb/constants.py and pass them to \
-                 set_senser_keys() (checked against the cited fingerprints)."
+                 senserKeysSha256 from pmca/usb/constants.py (or point --senser-config \
+                 / OG_SENSER_CONFIG at a JSON file shaped the same way) and pass them \
+                 to set_senser_keys() (checked against the cited fingerprints)."
                     .into(),
-            ));
+            )
+        })?;
+        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+            Error::Usb(
+                "enter_service: no SenserIo wired. Call set_senser_io() with a \
+                 transport (RusbSenserIo for real hardware, a mock for tests) before \
+                 entering service mode."
+                    .into(),
+            )
+        })?;
+
+        io.control_out(vendor::VREQ_START_SENSER)?;
+
+        for round in 0..vendor::AUTH_ROUNDS {
+            io.bulk_out(&auth_packet(vendor::AUTH_CMD_CHALLENGE, &[]))?;
+            let mut reply = [0u8; vendor::AUTH_PACKET_LEN];
+            io.bulk_in(&mut reply)?;
+            let code = auth_reply_code(&reply)
+                .ok_or_else(|| Error::Usb("enter_service: short challenge reply".into()))?;
+            let round_data = &reply[4..];
+            let key = match code {
+                vendor::AUTH_REPLY_SHA1 => &keys.sha1[round],
+                vendor::AUTH_REPLY_SHA256 => {
+                    return Err(Error::Usb(
+                        "enter_service: SHA256 challenge path is not implemented (its \
+                         response-body layout is not cited anywhere fetched from \
+                         PMCA-RE - refusing rather than guessing)."
+                            .into(),
+                    ));
+                }
+                other => {
+                    return Err(Error::Usb(format!(
+                        "enter_service: round {round} unexpected challenge reply code {other}"
+                    )));
+                }
+            };
+            let body = senser_response_sha1(round_data, key, vendor::PID_SENSER[1]);
+            io.bulk_out(&auth_packet(vendor::AUTH_CMD_RESPONSE, &body))?;
+            let mut resp_reply = [0u8; vendor::AUTH_PACKET_LEN];
+            io.bulk_in(&mut resp_reply)?;
+            match auth_reply_code(&resp_reply) {
+                Some(vendor::AUTH_REPLY_RESPONSE_OK) => {}
+                other => {
+                    return Err(Error::Usb(format!(
+                        "enter_service: round {round} response rejected (code {other:?})"
+                    )));
+                }
+            }
         }
-        // Keys + hash (crypto::sha1_faulty) + response framing (senser_response_sha1)
-        // are ready; round 1 challenge = auth_packet(1). What is missing is the senser
-        // control-transfer transport (vendorRequestOut + the ep1 terminal of
-        // SonySenserAuthDevice), which this MSC-bulk host does not implement.
-        let _challenge = auth_packet(vendor::AUTH_CMD_CHALLENGE, &[]);
-        Err(Error::Usb(
-            "enter_service: keys loaded and handshake/crypto ready, but the Senser \
-             control-transfer transport (vendorRequestOut + ep1 terminal, \
-             pmca/usb/sony.py SonySenserAuthDevice) is not implemented on this MSC-bulk \
-             host. That is the remaining hardware-integration step."
-                .into(),
-        ))
+
+        io.bulk_out(&auth_packet(vendor::AUTH_CMD_FINISH, &[]))?;
+        let mut finish_reply = [0u8; vendor::AUTH_PACKET_LEN];
+        io.bulk_in(&mut finish_reply)?;
+        match auth_reply_code(&finish_reply) {
+            Some(vendor::AUTH_REPLY_FINISH_OK) if finish_reply.get(4) == Some(&1) => {}
+            _ => return Err(Error::Usb("enter_service: finish rejected".into())),
+        }
+
+        self.state = LinkState::ServiceMode;
+        Ok(())
     }
 
     /// Step 3a: push the compiled helper to the camera (updater shell `PUSH`, then
@@ -649,6 +808,186 @@ mod tests {
         assert!(key_fingerprint_ok(&good, &vendor::SENSER_KEY_SHA1_FP[0]));
         assert!(!key_fingerprint_ok(&[0u8; 8], &vendor::SENSER_KEY_SHA1_FP[0]));
         assert!(!key_fingerprint_ok(&[0x7d], &vendor::SENSER_KEY_SHA1_FP[0])); // too short
+    }
+
+    #[test]
+    fn senser_config_json_parses_and_passes_fingerprint_check() {
+        // 3 hex entries per hash, each starting with a cited fingerprint; padded
+        // past 8 bytes so key_fingerprint_ok's length check also exercises.
+        let text = r#"{
+            "sha1": ["7d02841e0eeddb2f0011", "d6fdf3746cbaa9470011", "58dc5df6e5c3b0030011"],
+            "sha256": ["e606abc65e0d92c10011", "37c4b11c7ea10da10011", "36849b20b87d309c0011"]
+        }"#;
+        let keys = parse_senser_keys_json(text).unwrap();
+        for i in 0..3 {
+            assert!(key_fingerprint_ok(&keys.sha1[i], &vendor::SENSER_KEY_SHA1_FP[i]));
+            assert!(key_fingerprint_ok(&keys.sha256[i], &vendor::SENSER_KEY_SHA256_FP[i]));
+        }
+
+        // A link accepts these via set_senser_keys() (the public, checked entry point).
+        struct Dead;
+        impl BulkPipe for Dead {
+            fn write(&mut self, d: &[u8]) -> Result<usize> {
+                Ok(d.len())
+            }
+            fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+                Err(Error::Usb("no device".into()))
+            }
+        }
+        let mut link = ServiceLink::new(MscBot::new(Dead));
+        link.set_senser_keys(keys).unwrap();
+    }
+
+    #[test]
+    fn senser_config_json_rejects_wrong_entry_count() {
+        let text = r#"{"sha1": ["aabb"], "sha256": ["aabb", "ccdd", "eeff"]}"#;
+        let err = parse_senser_keys_json(text).unwrap_err();
+        assert!(matches!(err, Error::Parse(ref s) if s.contains("sha1") && s.contains("3 entries")));
+    }
+
+    #[test]
+    fn senser_config_json_rejects_bad_hex() {
+        let text = r#"{"sha1": ["zz", "bb", "cc"], "sha256": ["aa", "bb", "cc"]}"#;
+        let err = parse_senser_keys_json(text).unwrap_err();
+        assert!(matches!(err, Error::Parse(ref s) if s.contains("sha1[0]")));
+    }
+
+    #[test]
+    fn senser_config_json_rejects_fingerprint_mismatch() {
+        // Right shape, wrong bytes - set_senser_keys() must still refuse.
+        let text = r#"{
+            "sha1": ["0000000000000000", "0000000000000000", "0000000000000000"],
+            "sha256": ["0000000000000000", "0000000000000000", "0000000000000000"]
+        }"#;
+        let keys = parse_senser_keys_json(text).unwrap();
+        struct Dead;
+        impl BulkPipe for Dead {
+            fn write(&mut self, d: &[u8]) -> Result<usize> {
+                Ok(d.len())
+            }
+            fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+                Err(Error::Usb("no device".into()))
+            }
+        }
+        let mut link = ServiceLink::new(MscBot::new(Dead));
+        let err = link.set_senser_keys(keys).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("fingerprint mismatch")));
+    }
+
+    /// Scripted `SenserIo`: records control-OUT requests, replays queued bulk-in
+    /// frames, and echoes bulk-out frames so a test can inspect them.
+    struct MockSenserIo {
+        controls: Vec<(u8, u16, u16)>,
+        bulk_outs: Vec<Vec<u8>>,
+        bulk_ins: std::collections::VecDeque<Vec<u8>>,
+    }
+    impl MockSenserIo {
+        fn new(bulk_ins: Vec<Vec<u8>>) -> Self {
+            Self { controls: Vec::new(), bulk_outs: Vec::new(), bulk_ins: bulk_ins.into() }
+        }
+    }
+    impl SenserIo for MockSenserIo {
+        fn control_out(&mut self, req: (u8, u16, u16)) -> Result<()> {
+            self.controls.push(req);
+            Ok(())
+        }
+        fn bulk_out(&mut self, data: &[u8]) -> Result<usize> {
+            self.bulk_outs.push(data.to_vec());
+            Ok(data.len())
+        }
+        fn bulk_in(&mut self, buf: &mut [u8]) -> Result<usize> {
+            let frame = self.bulk_ins.pop_front().expect("unexpected bulk_in");
+            let n = frame.len().min(buf.len());
+            buf[..n].copy_from_slice(&frame[..n]);
+            Ok(n)
+        }
+    }
+
+    /// Build a canned AuthPacket reply: cmd sent as `~code`, salt 0, data all zero
+    /// except where the caller fills it in (used for the FINISH ok byte).
+    fn canned_reply(code: u16, data0: u8) -> Vec<u8> {
+        let mut r = Vec::with_capacity(vendor::AUTH_PACKET_LEN);
+        r.extend_from_slice(&(!code).to_be_bytes());
+        r.extend_from_slice(&0u16.to_be_bytes());
+        let mut data = vec![0u8; vendor::AUTH_DATA_LEN];
+        data[0] = data0;
+        r.extend_from_slice(&data);
+        r
+    }
+
+    #[test]
+    fn enter_service_roundtrips_over_mock_senser_io() {
+        struct Dead;
+        impl BulkPipe for Dead {
+            fn write(&mut self, d: &[u8]) -> Result<usize> {
+                Ok(d.len())
+            }
+            fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+                Err(Error::Usb("no device".into()))
+            }
+        }
+        let mut link = ServiceLink::new(MscBot::new(Dead));
+        link.set_allow_unverified(true);
+        link.set_senser_keys(SenserKeys {
+            sha1: [
+                vendor::SENSER_KEY_SHA1_FP[0].to_vec(),
+                vendor::SENSER_KEY_SHA1_FP[1].to_vec(),
+                vendor::SENSER_KEY_SHA1_FP[2].to_vec(),
+            ],
+            sha256: [
+                vendor::SENSER_KEY_SHA256_FP[0].to_vec(),
+                vendor::SENSER_KEY_SHA256_FP[1].to_vec(),
+                vendor::SENSER_KEY_SHA256_FP[2].to_vec(),
+            ],
+        })
+        .unwrap();
+
+        // 3 rounds x (challenge reply SHA1, response-ok reply) + 1 finish-ok reply.
+        let mut frames = Vec::new();
+        for _ in 0..vendor::AUTH_ROUNDS {
+            frames.push(canned_reply(vendor::AUTH_REPLY_SHA1, 0));
+            frames.push(canned_reply(vendor::AUTH_REPLY_RESPONSE_OK, 0));
+        }
+        frames.push(canned_reply(vendor::AUTH_REPLY_FINISH_OK, 1));
+        link.set_senser_io(Box::new(MockSenserIo::new(frames)));
+
+        link.enter_service().unwrap();
+        assert_eq!(link.state, LinkState::ServiceMode);
+    }
+
+    #[test]
+    fn enter_service_refuses_sha256_challenge_path() {
+        struct Dead;
+        impl BulkPipe for Dead {
+            fn write(&mut self, d: &[u8]) -> Result<usize> {
+                Ok(d.len())
+            }
+            fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+                Err(Error::Usb("no device".into()))
+            }
+        }
+        let mut link = ServiceLink::new(MscBot::new(Dead));
+        link.set_allow_unverified(true);
+        link.set_senser_keys(SenserKeys {
+            sha1: [
+                vendor::SENSER_KEY_SHA1_FP[0].to_vec(),
+                vendor::SENSER_KEY_SHA1_FP[1].to_vec(),
+                vendor::SENSER_KEY_SHA1_FP[2].to_vec(),
+            ],
+            sha256: [
+                vendor::SENSER_KEY_SHA256_FP[0].to_vec(),
+                vendor::SENSER_KEY_SHA256_FP[1].to_vec(),
+                vendor::SENSER_KEY_SHA256_FP[2].to_vec(),
+            ],
+        })
+        .unwrap();
+        link.set_senser_io(Box::new(MockSenserIo::new(vec![canned_reply(
+            vendor::AUTH_REPLY_SHA256,
+            0,
+        )])));
+
+        let err = link.enter_service().unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("SHA256")));
     }
 
     #[test]

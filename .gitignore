@@ -71,3 +71,5 @@ zig-out/
 .zig-cache/
 zig-cache/
 target-helper/build/
+
+senser_blobs.json
