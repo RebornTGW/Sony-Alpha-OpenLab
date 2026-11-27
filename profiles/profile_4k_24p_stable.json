@@ -1,0 +1,91 @@
+{
+  "schema": "opengate-profile/1",
+  "name": "profile_4k_24p_stable",
+  "model": "ILCE-6700",
+  "firmware": "2.00",
+  "status": "verified",
+  "verified_from": "CT6_20261127T002325Z_a6700_dump (read-only read-back after a stable MOVIE recording)",
+  "result_observed": "MP4 S-Log3 3840x2560 at 23.98p, ~97.6 Mbps; steady picture, recording did not stop.",
+  "summary": "4K Open Gate. 3840x2560 (3:2) using the contributed full encoder design (the stable step chain L13 + L5 + L16 + M19 + S16). This is the chain that recorded cleanly; the L19 (high-speed-only) encoder rebooted the kernel on the switch to MOVIE and must NOT be used.",
+  "output": { "width": 3840, "height": 2560, "aspect": "3:2", "fps": [24, 25, 50], "codecs": ["XAVC HS", "XAVC S", "XAVC S-I"] },
+  "sensor_window": {
+    "width": 5952,
+    "rows": 3876,
+    "first_row": 214,
+    "phase_detect_rows": 80,
+    "sampling": [1, 1, 165, 191],
+    "note": "Contributed 4K window. 3876 of the 3968 native 3:2 rows => picture is ~2.4% too tall (3876/3968 = 0.977). profile_true_3x2_experimental removes that."
+  },
+  "region_bases": {
+    "coprocessor": "0x0",
+    "libmpr.so": null,
+    "av-cam.bin": "0x401000000"
+  },
+  "verify_rule": "Read every write's address first; each must equal its 'stock' (or 'stock_sha256'). If any site differs, abort the whole profile before writing one byte (wrong firmware or already patched).",
+  "steps": [
+    {
+      "id": "L13",
+      "label": "raw write buffer (memory manager)",
+      "kind": "geometry",
+      "desc": "Enlarge the four raw write-buffer size words so the taller frame fits.",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x02580cd8", "len": 4, "stock": "00123401", "target": "005a6d01", "note": "LE uint32 0x01341200 -> 0x016d5a00; buffer byte-size for 3840x2560." },
+        { "region": "coprocessor", "addr": "0x02580cec", "len": 4, "stock": "00123401", "target": "005a6d01" },
+        { "region": "coprocessor", "addr": "0x02580d00", "len": 4, "stock": "00123401", "target": "005a6d01" },
+        { "region": "coprocessor", "addr": "0x02580df0", "len": 4, "stock": "00123401", "target": "005a6d01" }
+      ]
+    },
+    {
+      "id": "L5",
+      "label": "sensor drive window",
+      "kind": "sensor_registers",
+      "desc": "Open the sensor read-out window to 3876 rows from row 214 for drive modes 0x820/0x880/0x890/0x8c0/0x8d0 (0x830 left stock). Window geometry is declarative (above); the per-register byte values are firmware-derived.",
+      "window": { "rows": 3876, "first_row": 214, "phase_detect_rows": 80, "sampling": [1, 1, 165, 191] },
+      "payload_ref": "payloads/l5_sensor_window_3876_a6700_v1.bin",
+      "payload_spans": 6,
+      "payload_region": "sensor register matrix (L5 cells)",
+      "payload_note": "6 sensor-register cells. Firmware-derived bytes: NOT in this MIT repo. Supply from the GPL kit; the injector verifies them by sha256 before and after."
+    },
+    {
+      "id": "L16",
+      "label": "encoder output size",
+      "kind": "geometry",
+      "desc": "Set the movie-writer output size word to 3840x2560.",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x0199ecc4", "len": 4, "stock": "000f7008", "target": "000f000a", "derivation": "LE uint32 (width | height<<16): 0x08700f00 (3840x2160) -> 0x0a000f00 (3840x2560)." }
+      ]
+    },
+    {
+      "id": "M19",
+      "label": "full encoder design (ogfile2560_full_a6700_v1)",
+      "kind": "encoder_blob",
+      "desc": "The contributed full encoder design: 3840x2560 at 24/25/50p. This is the stable encoder (483 av-cam.bin spans). The anchors below are the two 3000-byte encoder records; the remaining spans/cells travel in the same payload.",
+      "payload_ref": "payloads/ogfile2560_full_a6700_v1.bin",
+      "payload_spans": 483,
+      "payload_note": "Firmware-derived encoder bytes: NOT in this MIT repo. Supply from the GPL kit. The injector verifies by sha256 before (stock) and after (target).",
+      "anchors": [
+        { "region": "coprocessor", "addr": "0xd3885c", "len": 3000, "role": "record_left",  "stock_sha256": "9c6992e902e00eab", "target_sha256": "ec3787d20c6f8e74" },
+        { "region": "coprocessor", "addr": "0xd39414", "len": 3000, "role": "record_right", "stock_sha256": "f0b18f90c47dd895", "target_sha256": "465b43ac56c4633b" }
+      ],
+      "side_effect": "Movie size table entry id 0x2d9 changes 3840x2160 -> 3840x2560 (same payload)."
+    },
+    {
+      "id": "S16",
+      "label": "screen / display fit",
+      "kind": "geometry",
+      "desc": "Make the rear 3:2 panel show the full frame (height 404 -> 480) and clear the 16:9 letterbox fit words.",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x001f5f9c", "len": 4, "stock": "03000000", "target": "00000000", "note": "letterbox fit flag off." },
+        { "region": "coprocessor", "addr": "0x00e99e68", "len": 4, "stock": "00002600", "target": "00000000", "note": "panel-1 vertical offset -> 0." },
+        { "region": "coprocessor", "addr": "0x00e99e6c", "len": 4, "stock": "80029401", "target": "8002e001", "derivation": "width 0x0280=640; height 0x0194=404 -> 0x01e0=480." },
+        { "region": "coprocessor", "addr": "0x00e99ec8", "len": 4, "stock": "00002600", "target": "00000000", "note": "panel-2 vertical offset -> 0." },
+        { "region": "coprocessor", "addr": "0x00e99ecc", "len": 4, "stock": "80029401", "target": "8002e001" }
+      ]
+    }
+  ],
+  "notes": [
+    "RAM only: a cold boot (battery out ~10 s) reverts everything. Whether the power switch alone reverts on the A6700 is unknown.",
+    "In-camera playback of the 3840x2560 clips needs the separate playback_fix profile.",
+    "Do NOT use the L19 encoder: it rebooted the kernel on the MOVIE switch (CT6_20261127T001105Z). M19 is the stable replacement."
+  ]
+}

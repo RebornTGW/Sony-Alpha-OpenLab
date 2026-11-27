@@ -1,0 +1,35 @@
+{
+  "schema": "opengate-profile/1",
+  "name": "playback_fix",
+  "model": "ILCE-6700",
+  "firmware": "2.00",
+  "status": "experimental",
+  "verified_from": null,
+  "result_observed": null,
+  "optional_module": true,
+  "apply_after": ["profile_4k_24p_stable", "profile_true_3x2_experimental"],
+  "summary": "Optional add-on (R19, pbmpr_a6700_v1): lets the camera play back its own 3840x2560 clips. Changes 7 instructions plus 1 table word of av-cam.bin and 1 instruction of libmpr.so. Each write refuses unless the instruction caches can be made to fetch it. Contributed; its author reports it works; not run by this project.",
+  "region_bases": {
+    "libmpr.so": null,
+    "av-cam.bin": "0x401000000"
+  },
+  "verify_rule": "Read-only first: in both reference dumps the 8 playback words were STOCK, so there is no target fingerprint here. Verify every span is stock before writing; supply the target bytes and fingerprints from the GPL kit.",
+  "steps": [
+    {
+      "id": "R19",
+      "label": "in-camera playback of 3840x2560 (pbmpr_a6700_v1)",
+      "kind": "code_patch",
+      "desc": "Instruction patches gated on cache coherency; self-refuse if a cache line cannot be flushed/invalidated to fetch the new bytes.",
+      "payload_ref": "payloads/pbmpr_a6700_v1.bin",
+      "payload_spans": 9,
+      "payload_breakdown": { "av-cam.bin_instructions": 7, "av-cam.bin_table_words": 1, "libmpr.so_instructions": 1 },
+      "payload_note": "Firmware-derived code bytes: NOT in this MIT repo and no fingerprint captured (stock in both reference dumps). Supply from the GPL kit; the injector verifies stock-before-write and reads back after.",
+      "cache_gate": true
+    }
+  ],
+  "notes": [
+    "Apply only after a 4K Open Gate profile is in RAM.",
+    "RAM only: battery out ~10 s reverts.",
+    "This touches executable code (instructions), not just data words: a bad write is more likely to restart the body than a geometry-only step. Battery pull clears it."
+  ]
+}

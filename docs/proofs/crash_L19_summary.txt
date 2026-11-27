@@ -1,0 +1,26 @@
+A6700 2.00 — L19 KERNEL REBOOT (anonymized extract)
+===================================================
+Source: read-only RAM read-check taken AFTER the body rebooted.
+Serial, local paths and raw firmware bytes removed.
+
+EVENT: the L19 encoder design (ogfile2560_hs_s, high-speed-only, 107 spans) was
+       loaded, then the camera was switched STILL -> MOVIE. The body REBOOTED
+       (kernel restart).
+
+Because a reboot clears RAM, the dump taken afterwards reads all-stock:
+
+VERDICT: READY (every identity check same; every site stock)
+identity: 7 same, 0 differ
+encoder side: stock
+  libmpr.so spans: 13, 13 stock
+  av-cam.bin spans: 621, 621 stock
+  L19 ogfile2560_hs_s : not applied (0 of 107 spans hold its bytes)   <- cleared
+  M19 ogfile2560_full : not applied (0 of 483 spans hold its bytes)
+
+display panels : rear 3 (3:2), second 2 (4:3)
+
+CONCLUSION: the reboot came from the high-speed-only encoder (L19), not from the
+            geometry writes. The full encoder (M19) is stable — see
+            stable_M19_summary.txt. Rule: use M19, never L19.
+
+NOTE: volatile RAM only — the reboot itself reverted the body to stock.

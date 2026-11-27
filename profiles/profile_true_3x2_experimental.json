@@ -1,0 +1,91 @@
+{
+  "schema": "opengate-profile/1",
+  "name": "profile_true_3x2_experimental",
+  "model": "ILCE-6700",
+  "firmware": "2.00",
+  "status": "experimental",
+  "verified_from": null,
+  "result_observed": null,
+  "summary": "Exact native 3:2 window. Same output (3840x2560) as the stable profile but read from the FULL 3:2 sensor window 5952x3968 starting at row 94, instead of the contributed 5952x3876 from row 214. Capturing all 3968 native rows removes the ~2.4% height stretch (3876/3968 = 0.977). NEVER RUN ON ANY A6700. Treat as a first-light experiment.",
+  "output": { "width": 3840, "height": 2560, "aspect": "3:2", "fps": [24, 25], "codecs": ["XAVC HS", "XAVC S", "XAVC S-I"] },
+  "sensor_window": {
+    "width": 5952,
+    "rows": 3968,
+    "first_row": 94,
+    "note": "5952x3968 is the exact 3:2 read-out (3968 = 5952 * 2/3). 94 + 3968 = 4062. The 3968 row COUNT fits the 3980-line dmmwb write buffer; the first-row register (94) is below 256 and has never been exercised."
+  },
+  "dmmwb_buffer_rows": 3980,
+  "removes_correction_factor": 0.977,
+  "region_bases": {
+    "coprocessor": "0x0",
+    "libmpr.so": null,
+    "av-cam.bin": "0x401000000"
+  },
+  "verify_rule": "Read every write's address first; each must equal its 'stock'. Abort the whole profile on any mismatch. Because no A6700 has run this window, the experimental steps carry NO target fingerprints: the encoder/sensor payload must be regenerated for 3968 by the GPL kit's apply32 and dropped into payloads/.",
+  "steps": [
+    {
+      "id": "L13",
+      "label": "raw write buffer (memory manager)",
+      "kind": "geometry",
+      "desc": "Enlarge the four raw write-buffer size words for 3840x2560 sourced from a 3968-row window.",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x02580cd8", "len": 4, "stock": "00123401", "target": null, "derivation": "recompute buffer byte-size for width 5952 x 3968 rows at apply time; must be <= the 3980-line dmmwb buffer." },
+        { "region": "coprocessor", "addr": "0x02580cec", "len": 4, "stock": "00123401", "target": null },
+        { "region": "coprocessor", "addr": "0x02580d00", "len": 4, "stock": "00123401", "target": null },
+        { "region": "coprocessor", "addr": "0x02580df0", "len": 4, "stock": "00123401", "target": null }
+      ]
+    },
+    {
+      "id": "L5",
+      "label": "sensor drive window (exact 3:2)",
+      "kind": "sensor_registers",
+      "desc": "Open the sensor window to the full 3968 rows from row 94. Geometry is declarative; register bytes are firmware-derived and must be regenerated for this window.",
+      "window": { "rows": 3968, "first_row": 94 },
+      "payload_ref": "payloads/l5_sensor_window_3968_a6700_exp.bin",
+      "payload_spans": 6,
+      "payload_region": "sensor register matrix (L5 cells)",
+      "payload_note": "No fingerprints: this window has never been generated or run. Build with the GPL kit (apply32) and verify stock-before-write only.",
+      "risk": "first_row 94 (< 256) is an untested sensor-register range: possible black frame or kernel reboot, like the L19 encoder crash. A battery pull clears it."
+    },
+    {
+      "id": "L16",
+      "label": "encoder output size",
+      "kind": "geometry",
+      "desc": "Output size word stays 3840x2560; the difference from the stable profile is purely the taller, un-squeezed source window.",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x0199ecc4", "len": 4, "stock": "000f7008", "target": "000f000a", "derivation": "LE uint32 (width | height<<16): 3840x2560." }
+      ]
+    },
+    {
+      "id": "M19x",
+      "label": "full encoder design for the 3968 window",
+      "kind": "encoder_blob",
+      "desc": "Full encoder design regenerated for a 3968-row window. No verified bytes exist.",
+      "payload_ref": "payloads/ogfile2560_full3968_a6700_exp.bin",
+      "payload_spans": null,
+      "payload_note": "Firmware-derived AND unverified. NOT in this MIT repo and no fingerprint is known. Regenerate with the GPL kit's apply32 for 5952x3968.",
+      "anchors": [
+        { "region": "coprocessor", "addr": "0xd3885c", "len": 3000, "role": "record_left",  "stock_sha256": "9c6992e902e00eab", "target_sha256": null },
+        { "region": "coprocessor", "addr": "0xd39414", "len": 3000, "role": "record_right", "stock_sha256": "f0b18f90c47dd895", "target_sha256": null }
+      ]
+    },
+    {
+      "id": "S16",
+      "label": "screen / display fit",
+      "kind": "geometry",
+      "desc": "Same rear-panel fit as the stable profile (full 3:2 panel, letterbox off).",
+      "writes": [
+        { "region": "coprocessor", "addr": "0x001f5f9c", "len": 4, "stock": "03000000", "target": "00000000" },
+        { "region": "coprocessor", "addr": "0x00e99e68", "len": 4, "stock": "00002600", "target": "00000000" },
+        { "region": "coprocessor", "addr": "0x00e99e6c", "len": 4, "stock": "80029401", "target": "8002e001" },
+        { "region": "coprocessor", "addr": "0x00e99ec8", "len": 4, "stock": "00002600", "target": "00000000" },
+        { "region": "coprocessor", "addr": "0x00e99ecc", "len": 4, "stock": "80029401", "target": "8002e001" }
+      ]
+    }
+  ],
+  "notes": [
+    "EXPERIMENTAL. Never run on any A6700. Do not mix with the stable profile in the same session.",
+    "RAM only: battery out ~10 s reverts. Keep the battery handy during the first attempt.",
+    "If the picture is black or the body restarts, pull the battery and fall back to profile_4k_24p_stable."
+  ]
+}

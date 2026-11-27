@@ -3,6 +3,7 @@
 **🌍 Langue : [English](README.md) · Français**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Release](https://img.shields.io/badge/release-v0.1.0--alpha-blue.svg)](#)
 [![Status](https://img.shields.io/badge/status-active%20development-orange.svg)](#)
 [![Discord](https://img.shields.io/badge/Discord-Sony%20Alpha%20OpenLab-5865F2?logo=discord&logoColor=white)](https://discord.gg/Zr72h6AFa5)
 
@@ -183,12 +184,19 @@ interface sur **WinUSB**.
 6. À droite de la flèche, choisissez le pilote cible **WinUSB**.
 7. Cliquez sur **Replace Driver** (ou **Install Driver**) et confirmez.
 
-> ⚠️ **Un pilote WinUSB par mode USB.** Le boîtier expose un **PID USB différent selon
-> le mode** — **PC Remote `0x0E78`** vs **Mass Storage `0x0E76`** (utilisé par
-> `ram_opengate.py`). Windows traite chaque PID comme un périphérique distinct : il
-> faut donc relancer Zadig et lier **WinUSB** à nouveau après avoir changé de mode.
-> Pour annuler une liaison : *Gestionnaire de périphériques → l'interface →
-> Désinstaller le périphérique* → débrancher/rebrancher.
+> ⚠️ **Un pilote WinUSB par PID USB.** Le boîtier expose un **PID USB différent selon
+> le mode**, et Windows traite chaque PID comme un périphérique distinct — on lie donc
+> **WinUSB / libusb-win32** une fois par PID :
+>
+> | PID | Mode | Utilisé par |
+> |---|---|---|
+> | `054C:0E78` | PC Remote | `probe_a6700.py`, `multi_exposure.py` |
+> | `054C:0E76` | Mass Storage | `ram_opengate.py`, `opengate_inject.py` (entrée) |
+> | `054C:0336` | Mode service | voie Open Gate RAM (réénumère depuis `0E76`) |
+>
+> Relancez Zadig et liez **WinUSB** à nouveau après un changement de mode / quand un
+> nouveau PID apparaît. Pour annuler une liaison : *Gestionnaire de périphériques →
+> l'interface → Désinstaller le périphérique* → débrancher/rebrancher.
 
 > 💡 **Réversible.** Pour rendre le boîtier de nouveau reconnu comme appareil photo
 > normal par Windows : *Gestionnaire de périphériques → l'interface → Désinstaller
@@ -530,6 +538,39 @@ certains éditeurs/lecteurs — sans réencodage, simple remux :
 ffmpeg -i input.mp4 -map 0:v:0 -map 0:a? -c copy -movflags +faststart output.mp4
 ```
 
+### Correction verticale + livraison simultanée 3:2 / 16:9 / 9:16
+
+Le clip stable **3840×2560** utilise la fenêtre capteur contribuée (5952×**3876**),
+qui ne capte que `3876 / 3968 = 0,977` du champ 3:2 natif — l'image est donc
+**~2,4 % trop haute**. Corrigez en écrasant la hauteur à **97,7 %**, puis coupez
+chaque format depuis ce seul master :
+
+```bash
+# 0) Un master 3:2 corrigé (3840x2560 -> hauteur x0,977), scaler de qualité
+ffmpeg -i opengate.mp4 -vf "scale=3840:2502:flags=lanczos,setsar=1" \
+       -c:v prores_ks -profile:v 3 -c:a copy master_3x2.mov
+
+# 1) trois livrables depuis le master corrigé, en UNE passe (pas de perte en chaîne)
+ffmpeg -i master_3x2.mov -filter_complex "\
+  [0:v]crop=3840:2502[c32]; \
+  [0:v]crop=3840:1408:0:(ih-1408)/2[c169]; \
+  [0:v]crop=1408:2502:(iw-1408)/2:0[c916]" \
+  -map "[c32]"  -c:v prores_ks -profile:v 3 deliver_3x2.mov \
+  -map "[c169]" -c:v prores_ks -profile:v 3 deliver_16x9.mov \
+  -map "[c916]" -c:v prores_ks -profile:v 3 deliver_9x16.mov
+```
+
+| Sortie | Recadrage depuis le master corrigé 3840×2502 | Usage |
+|---|---|---|
+| **3:2** | image entière `3840×2502` | le rendu open gate, natif sur l'écran arrière |
+| **16:9** | centre `3840×1408` (haut/bas rognés) | livraison vidéo standard |
+| **9:16** | centre `1408×2502` | vertical / réseaux, recadré depuis la capture plus haute |
+
+> Tout l'intérêt de l'open gate : filmer le master 3:2 **une seule fois**, puis
+> recadrer 16:9 et 9:16 dans la résolution verticale en plus au lieu de refilmer. La
+> fenêtre 3:2 exacte expérimentale (5952×3968) supprime l'étape des 97,7 % — voir
+> [`RESEARCH.md`](RESEARCH.md).
+
 ---
 
 ## 🧬 Open Gate 3:2 RAM volatile (recherche, `ram_opengate.py`)
@@ -578,6 +619,43 @@ python ram_opengate.py --restore
 > en boîtier exige un correctif séparé. Code MIT uniquement, zéro octet firmware, zéro
 > écriture flash.
 
+### Injecteur mono-session (`opengate_inject.py`) + profils déclaratifs
+
+`ram_opengate.py` prouve un seul site ; `opengate_inject.py` applique un **profil
+entier en une seule session service tenue** — le boîtier passe en mode service une
+fois et les écritures de chaque étape s'enchaînent en RAM, supprimant les
+débranchements manuels entre étapes. Les tables de patch vivent en données brutes
+dans [`profiles/`](profiles/) :
+
+| Profil | État | Quoi |
+|---|---|---|
+| `profile_4k_24p_stable` | **vérifié** | 3840×2560 via la chaîne stable M19 (enregistrement propre) |
+| `profile_true_3x2_experimental` | expérimental | fenêtre exacte 5952×3968 (jamais lancée) |
+| `playback_fix` | expérimental | module optionnel R19 de lecture en boîtier |
+
+Les mots de géométrie portent des octets cibles littéraux (arithmétique à partir de
+la résolution) ; les blobs encodeur/capteur/lecture dérivés du firmware **ne sont pas
+dans ce dépôt** — chaque étape référence un `payloads/*.bin` (git-ignoré) vérifié par
+sha256. Le pré-vol contrôle NTSC/PAL vs les cadences du profil et la molette
+STILL/MOVIE avant toute écriture.
+
+```bash
+# Sans boîtier : affiche le plan d'écriture résolu + le pré-vol (défaut)
+python opengate_inject.py profile_4k_24p_stable --video-standard NTSC --dial MOVIE
+
+# Lister les profils fournis
+python opengate_inject.py --list
+
+# Lecture seule sur boîtier : confirme que chaque site est au stock
+python opengate_inject.py profile_4k_24p_stable --verify-only
+
+# Application opt-in (nécessite un transport CameraMemory branché ; verify -> backup -> write -> readback)
+python opengate_inject.py profile_4k_24p_stable --confirm-ram-write
+```
+
+Voir [`RESEARCH.md`](RESEARCH.md) pour les découvertes matérielles derrière ces
+profils (dalles, reboot L19-vs-M19, le buffer de 3980 lignes qui accueille le vrai 3:2).
+
 **Sur le terrain (sans PC).** Une fois vérifié sur PC, le patch volatile peut tourner
 depuis un téléphone en **USB-C OTG** (Android + Termux + `pyusb`/PMCA-RE côté hôte).
 L'étape du helper embarqué reste nécessaire — le kit ArcaneLantern fournit une APK
@@ -604,6 +682,10 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ## 📚 Documentation
 
+- [`RESEARCH.md`](RESEARCH.md) — **découvertes matérielles inédites A6700 2.00** :
+  dalles d'affichage (arrière 3:2 / EVF 4:3), diagnostic du reboot noyau L19-vs-M19,
+  et le calcul du buffer `dmmwb` de 3980 lignes qui ouvre la voie au vrai 3:2.
+- [`profiles/README.md`](profiles/README.md) — format des tables de patch Open Gate déclaratives.
 - [`docs/ROADMAP.md`](docs/ROADMAP.md) (FR) / [`docs/ROADMAP.en.md`](docs/ROADMAP.en.md) (EN)
   — jalons accomplis et prochaines étapes (portabilité, étude Open Gate, autres boîtiers).
 - [`docs/RESULTS.md`](docs/RESULTS.md) (FR) / [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN)
@@ -626,16 +708,20 @@ Sony-Alpha-OpenLab/
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # capture multi-exposition automatisée + empilement optionnel
 ├── ram_opengate.py      # Open Gate RAM volatile (Mass Storage, recherche)
+├── opengate_inject.py   # injecteur Open Gate mono-session (charge profiles/)
+├── profiles/            # tables de patch Open Gate déclaratives (JSON) + README du format
 ├── sony_codes.py        # dictionnaires de codes PTP (constantes de protocole)
 ├── requirements.txt   # dépendances Python (pyusb ; pillow/numpy optionnels)
-├── .gitignore         # exclusion stricte des binaires/firmware
+├── .gitignore         # exclusion stricte des binaires/firmware + dumps bruts
 ├── LICENSE            # licence MIT
+├── RESEARCH.md        # découvertes matérielles inédites A6700 2.00
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # guide de contribution (EN / FR)
 ├── docs/
 │   ├── PROTOCOL.md / PROTOCOL.en.md              # architecture protocole (FR / EN)
 │   ├── DEVICE_PROPERTIES.md / .en.md             # table des 386 codes (FR / EN)
 │   ├── RESULTS.md / RESULTS.en.md                # résultats expérimentaux en direct (FR / EN)
-│   └── ROADMAP.md / ROADMAP.en.md                # jalons & prochaines étapes (FR / EN)
+│   ├── ROADMAP.md / ROADMAP.en.md                # jalons & prochaines étapes (FR / EN)
+│   └── proofs/                                   # extraits de logs anonymisés + captures de preuve
 └── README.md / README.fr.md                      # ce fichier (EN / FR)
 ```
 
@@ -649,9 +735,16 @@ Sony-Alpha-OpenLab/
 
 ## 🙏 Remerciements
 
-**Claude Code (Anthropic)** a fortement contribué à la recherche, à l'analyse de
-rétro-ingénierie et au développement de ce projet — analyse statique du firmware,
-cartographie du protocole PTP/SDIO et outillage Python.
+- **[ArcaneLantern/a6700-open-gate-test](https://github.com/ArcaneLantern/a6700-open-gate-test)**
+  (GPL-3.0) — recherche Open Gate amont pour l'A6700. Son pipeline mode service et sa
+  carte d'adresses ont servi de référence à notre voie RAM. *Référencé, jamais copié :*
+  ce dépôt MIT ne contient aucune source GPL ni octet firmware ; nos profils ont été
+  bâtis en clean-room depuis nos propres dumps matériels en lecture seule.
+- **[ma1co/Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE)** (MIT) — le handshake
+  mode service Sony.
+- **Claude Code (Anthropic)** a fortement contribué à la recherche, à l'analyse de
+  rétro-ingénierie et au développement de ce projet — analyse statique du firmware,
+  cartographie du protocole PTP/SDIO et outillage Python.
 
 ---
 

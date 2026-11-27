@@ -52,3 +52,15 @@ Thumbs.db
 out/
 *.arw
 *.ARW
+
+# --- Payloads dérivés du firmware (fournis localement depuis le kit GPL) ---
+# Les profils Open Gate référencent payloads/*.bin ; ces octets ne doivent
+# JAMAIS entrer dans ce dépôt MIT. Gardés hors-dépôt, vérifiés par sha256.
+payloads/
+
+# --- Dumps bruts de test matériel (JAMAIS publiés : contiennent des octets firmware) ---
+camera_private/
+*_a6700_dump/
+*_a6700_check/
+readcheck_result.txt
+transcript.jsonl

@@ -1,0 +1,27 @@
+A6700 2.00 — STABLE RUN (anonymized extract)
+=============================================
+Source: read-only RAM read-check after a successful recording.
+Serial, local paths and raw firmware bytes removed. Dimensions and diagnostic
+summary lines only.
+
+VERDICT: READY (every identity check same; every site stock or a kit target)
+identity: 7 same, 0 differ
+model: ILCE-6700    firmware: 2.00
+kernel: Linux 4.9.337-scel+  (SMP PREEMPT, 2025)
+
+encoder side: 4K open gate applied with the contributed full encoder design
+              (M19, 3840x2560 at 24/25/50p)
+
+step chain applied: L13 + L5 + L16 + M19 + S16
+  L5  sensor window : 3876 rows from row 214, 80 phase-detect rows
+  L16 output size   : 3840x2160 -> 3840x2560
+  M19 encoder spans : av-cam.bin 475 changed + libmpr.so 8 changed (= 483)
+  S16 screen        : rear panel fit 404 -> 480, 16:9 letterbox cleared
+
+movie size table: ... 3840x2560 id 0x2d9 ...   (was 3840x2160)
+display panels  : rear 3 (3:2), second 2 (4:3)
+
+RESULT (observed): MP4 S-Log3 3840x2560 @ 23.98p, ~97.6 Mbps. Recording stable,
+                   did not stop.
+
+NOTE: volatile RAM only — a cold boot (battery out ~10 s) reverts everything.
