@@ -1,0 +1,20 @@
+{
+  "name": "Sony A7C II",
+  "model": "ILCE-7CM2",
+  "firmware_verified": null,
+  "sensor": "Full-Frame 33 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": null,
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "placeholder, awaiting hardware",
+  "notes": "Compact body, same 33 MP full-frame sensor as the A7 IV. PID/model code to confirm on hardware."
+}

@@ -13,6 +13,7 @@ tests, not from GPL source:
 | `profile_4k_24p_stable` | **verified** | 3840×2560 (3:2) with the contributed full encoder (M19). The chain that recorded a clean S-Log3 MP4 at 23.98p / 97.6 Mbps. |
 | `profile_true_3x2_experimental` | experimental | Exact native 3:2 window 5952×3968 from row 94. Removes the ~2.4 % height stretch. **Never run on any A6700.** |
 | `playback_fix` | experimental | Optional R19 add-on so the camera plays its own 3840×2560 clips. |
+| `fx30_v5.00`, `zve10m2_v1.00`, `fx2_v1.00`, `fx3_v6.00`, `a7m4_v4.00` | experimental, **locked skeleton** | Real `L13`/`L16`/`S16` step ids, **zero resolved writes** — no memory offset on a non-A6700 body is guessed. `host-injector` refuses `--confirm-ram-write` on a profile with zero resolved writes. See the root README's ["Contributing a New BIONZ XR Body"](../README.md#-contributing-a-new-bionz-xr-body) for how to fill one in via `--dump-ram` + `--scan-dump`. `L19` is deliberately excluded from all five (see `RESEARCH.md` on the kernel-reboot risk). |
 
 ## What is in a profile, and what is not
 

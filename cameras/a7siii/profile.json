@@ -1,0 +1,20 @@
+{
+  "name": "Sony A7S III",
+  "model": "ILCE-7SM3",
+  "firmware_verified": null,
+  "sensor": "Full-Frame 12.1 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": null,
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "placeholder, awaiting hardware",
+  "notes": "Low-light/video flagship. Same BIONZ XR chip family as the A6700; sensor and firmware differ. PID/model code to confirm on hardware."
+}

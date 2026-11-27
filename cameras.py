@@ -1,9 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Camera profile loader for the Sony APS-C (BIONZ XR) toolkit.
+"""Camera profile loader for the Sony BIONZ XR toolkit.
 
-Profiles live in cameras/<id>/profile.json. Root tools (probe_a6700.py,
-experiment_a6700.py, multi_exposure.py) keep working unchanged; they may call
-load_profile() to pick a body's VID/PID/handles. Original code only (MIT)."""
+Profiles live in cameras/<id>/profile.json. 14 bodies catalogued across 5
+sensor families (see cameras/README.md): APS-C 26 MP (a6700, fx30, zve10m2),
+Full-Frame 12.1 MP (a7siii, fx3, zve1), Full-Frame 33 MP (a7m4, a7c2, fx2),
+Full-Frame 61 MP (a7r5, a7cr), Full-Frame Stacked/GS (a1, a1ii, a9iii). This
+loader is fully dynamic - it does not hardcode that list, so dropping a new
+cameras/<id>/profile.json in is enough to pick it up, no code change needed
+here.
+
+Root tools (probe_a6700.py, experiment_a6700.py, multi_exposure.py) keep
+working unchanged; they may call load_profile() to pick a body's VID/PID/
+handles. Original code only (MIT)."""
 
 from __future__ import annotations
 
@@ -22,7 +30,8 @@ def list_cameras():
 
 
 def load_profile(name: str = DEFAULT) -> dict:
-    """Return the profile dict for a camera id (e.g. 'a6700', 'fx30', 'zve10m2')."""
+    """Return the profile dict for a camera id (e.g. 'a6700', 'fx30', 'a7m4', 'a1';
+    see cameras/README.md for the full 14-body catalog)."""
     path = os.path.join(_DIR, name, "profile.json")
     if not os.path.isfile(path):
         raise FileNotFoundError(

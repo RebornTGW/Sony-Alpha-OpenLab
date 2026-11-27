@@ -170,12 +170,26 @@ impl<'a, T: RamTransport> Drop for SessionGuard<'a, T> {
     }
 }
 
-/// Apply a profile's geometry writes in one session. Verifies all stock first,
-/// then writes with per-step readback; any failure rolls the whole chain back via
-/// the RAII guard. Firmware-derived payload steps are not applied here (no bytes).
+/// Apply a profile's geometry writes in one session. Refuses outright if the
+/// profile resolves to zero writes (e.g. a locked multi-camera skeleton whose
+/// steps are all still `"writes": []`, pending `--dump-ram` / `--scan-dump`) -
+/// no point opening the camera and verifying stock for a no-op. Otherwise
+/// verifies all stock first, then writes with per-step readback; any failure
+/// rolls the whole chain back via the RAII guard. Firmware-derived payload steps
+/// are not applied here (no bytes).
 pub fn apply_profile<T: RamTransport>(prof: &Profile, t: &mut T) -> Result<usize> {
-    verify_stock(prof, t)?;
     let recs = records(prof)?;
+    if recs.is_empty() {
+        return Err(Error::Parse(format!(
+            "{} has zero resolved writes (every step's \"writes\" is empty, or none carry \
+             both stock and target bytes yet) - nothing to apply. Use --dump-ram to read \
+             candidate offsets off the body and --scan-dump to locate them from a target \
+             firmware dump against a verified reference profile, then fill in this \
+             profile's writes before trying --confirm-ram-write.",
+            prof.name
+        )));
+    }
+    verify_stock(prof, t)?;
     let mut guard = SessionGuard::new(t);
     for r in &recs {
         guard.write(r.vaddr, &r.target)?; // early-return here triggers rollback on drop
@@ -296,6 +310,32 @@ mod tests {
             let stock_matches = ram.read(r.vaddr, r.stock.len()).unwrap() == r.stock;
             assert!(stock_matches, "site 0x{:x} not restored", r.vaddr);
         }
+    }
+
+    #[test]
+    fn apply_profile_refuses_zero_resolved_writes() {
+        // Shaped like the locked multi-camera skeletons (profiles/fx30_v5.00.json
+        // and friends): a real step id, but "writes": [] - pending --dump-ram /
+        // --scan-dump. No camera touched here (MockRam would happily no-op), so
+        // this specifically checks apply_profile() refuses before even trying.
+        let p = Profile {
+            schema: "opengate-profile/1".into(),
+            name: "skeleton_test".into(),
+            status: "experimental".into(),
+            output: Default::default(),
+            region_bases: Default::default(),
+            steps: vec![crate::profile::Step {
+                id: "L13".into(),
+                label: String::new(),
+                kind: "geometry".into(),
+                writes: vec![],
+            }],
+            summary: String::new(),
+        };
+        let mut ram = MockRam::new();
+        let err = apply_profile(&p, &mut ram).unwrap_err();
+        assert!(matches!(err, Error::Parse(ref s) if s.contains("zero resolved writes")));
+        assert!(matches!(err, Error::Parse(ref s) if s.contains("--dump-ram") && s.contains("--scan-dump")));
     }
 
     #[test]

@@ -78,31 +78,39 @@ the safety approach below.
 ## 📷 Supported cameras & roadmap
 
 The toolkit is built on the Sony Alpha remote protocol (PTP + Sony "SDIO" vendor
-extension), which is largely shared across the line. Support is rolled out by
-processor generation:
+extension) and the Open Gate RAM patch path, both largely shared across the
+**BIONZ XR** line. 14 BIONZ XR bodies are catalogued under
+[`cameras/`](cameras/), grouped by sensor family (closer family = closer
+expected memory layout to the verified A6700):
 
-| Generation | Bodies | Planned support |
+| Sensor family | Bodies | Status |
 |---|---|---|
-| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30**, **ZV-E10 II** | **Direct / priority** — primary development target |
-| **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (after APS-C validation) |
-| **BIONZ X** (APS-C) | A6600, A6400 | Later support (older protocol dialect) |
+| APS-C 26 MP (IMX571) | **A6700** ✅, FX30, ZV-E10 II | A6700 verified (fw 2.00); others await `--dump-ram` / `--scan-dump` |
+| Full-Frame 12.1 MP | A7S III, FX3, ZV-E1 | awaiting `--dump-ram` / `--scan-dump` |
+| Full-Frame 33 MP | A7 IV, A7C II, FX2 | awaiting `--dump-ram` / `--scan-dump` |
+| Full-Frame 61 MP | A7R V, A7CR | awaiting `--dump-ram` / `--scan-dump` |
+| Full-Frame Stacked / GS | A1, A1 II, A9 III | awaiting `--dump-ram` / `--scan-dump` |
 
-Development priority:
+Older **BIONZ X** bodies (A6400, A6600, ZV-E10 Mark I) are a different protocol
+generation and are not catalogued here yet.
 
-1. **Sony A6700** — reference body (developed and tested here first).
-2. Other **BIONZ XR APS-C** bodies (FX30, ZV-E10 II) — expected to be the closest match.
-3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
-4. **BIONZ X** bodies (A6400, A6600) — handled afterward, as their protocol
-   generation differs.
+Two separate catalogs, by design:
 
-**Per-camera profiles** live under [`cameras/`](cameras/) (modular Sony APS-C
-BIONZ XR architecture): **`a6700`** (primary), **`fx30`**, **`zve10m2`** — same 26 MP
-APS-C BIONZ XR sensor. Load via `from cameras import load_profile`. Older **BIONZ X**
-bodies (A6400, A6600, ZV-E10 Mark I) come later; **ZV-E1 is Full-Frame** (separate).
+- **[`cameras/`](cameras/)** — USB identity (VID/PID, capture handles) for the
+  PTP/SDIO remote-control tools (`probe_a6700.py`, `experiment_a6700.py`,
+  `multi_exposure.py`). Load via `from cameras import load_profile`.
+- **[`profiles/`](profiles/)** (consumed by [`host-injector/`](host-injector/)) —
+  the Open Gate RAM patch tables. Only `profile_4k_24p_stable` is verified; the
+  per-body skeletons (`fx30_v5.00`, `zve10m2_v1.00`, `fx2_v1.00`, `fx3_v6.00`,
+  `a7m4_v4.00`) are **locked**: real step ids, zero resolved writes, no
+  fabricated offsets. See
+  ["Contributing a New BIONZ XR Body"](#-contributing-a-new-bionz-xr-body) below.
 
-> ✅ = actively tested · others = planned. Compatibility is validated per body;
-> a code being present in the protocol does not mean it is exposed on every model.
-> Want your body supported? See [Community & ideas](#-community--ideas).
+> ✅ = actively tested · others = planned/placeholder. Compatibility is validated
+> per body; a code being present in the protocol does not mean it is exposed on
+> every model, and model codes/PIDs for non-A6700 bodies are unconfirmed until
+> checked on hardware. Want your body supported? See
+> [Community & ideas](#-community--ideas).
 
 ---
 
@@ -667,6 +675,8 @@ cargo run -- --list                                                    # list bu
 cargo run -- profile_4k_24p_stable --video-standard NTSC --dial MOVIE  # --plan (default): write plan + preflight, no camera
 cargo run -- profile_4k_24p_stable --verify-only                       # open the camera, confirm every site holds stock
 cargo run -- profile_4k_24p_stable --confirm-ram-write                 # opt-in: apply the profile (volatile RAM)
+cargo run -- --dump-ram 0x02580cd8 0x40 --out dump.bin                 # opt-in: dump LEN bytes from ADDR to a file
+cargo run -- --scan-dump target_fw.bin --ref-profile profile_4k_24p_stable.json  # offline: no camera, see below
 ```
 
 Entering Sony's service mode needs the Senser key tables — external MIT data, not
@@ -687,6 +697,52 @@ unit-tested against mocks, but **not yet proven on a live A6700**. Until that fl
 flips to `true`, sending real vendor frames requires the explicit
 `--allow-unverified-usb` opt-in above plus its interactive `yes` confirm — the same
 two-gate pattern every real-hardware path in this repo uses.
+
+---
+
+## 🛰️ Contributing a New BIONZ XR Body
+
+A **locked skeleton** profile already exists in [`profiles/`](profiles/) for each
+body currently awaiting hardware (`fx30_v5.00`, `zve10m2_v1.00`, `fx2_v1.00`,
+`fx3_v6.00`, `a7m4_v4.00`) — real step ids (`L13`/`L16`/`S16`), `"status":
+"experimental"`, and **zero resolved writes**: no memory offset in this repo was
+ever guessed. `host-injector` refuses `--confirm-ram-write` on a profile with
+zero resolved writes, so these skeletons are safe to have around before anyone
+has touched the body. If you have a camera from the table above and want to help
+locate its sites, read-only, in three steps:
+
+1. **`--dump-ram`** — once you're far enough to open a Senser-mode session on
+   *your* body (same `--allow-unverified-usb` gate as everywhere else), read a
+   candidate region to a local file:
+   ```bash
+   cargo run -- --dump-ram 0x02580cd8 0x40 --out your_body_dump.bin \
+     --senser-config senser_blobs.json --allow-unverified-usb
+   ```
+2. **`--scan-dump`** — fully offline, no camera: search a firmware dump (yours,
+   or a bigger one you already have) for the verified A6700 profile's stock-byte
+   signatures (`L13`/`L16`/`S16`), and get a draft profile with whatever offsets
+   it found:
+   ```bash
+   cargo run -- --scan-dump your_body_dump.bin --ref-profile profile_4k_24p_stable.json \
+     --out your_body_draft.json
+   ```
+   A unique match becomes a write in the draft; an ambiguous or missing one is
+   flagged in `notes` instead of guessed — resolve those by hand before trusting
+   them.
+3. **`--verify-only`** — merge the draft's resolved writes into your body's
+   skeleton profile, then confirm every site actually holds the expected stock
+   bytes **before** anyone tries `--confirm-ram-write`:
+   ```bash
+   cargo run -- your_body_v1.00 --verify-only --senser-config senser_blobs.json --allow-unverified-usb
+   ```
+
+Do **not** add an `L19`-equivalent step to a new body's profile: on the verified
+A6700, `L19` (the high-speed-only encoder) rebooted the kernel on the
+STILL→MOVIE switch (see [`RESEARCH.md`](RESEARCH.md)); `M19` was the stable
+replacement there, and no non-A6700 body has an `M19` equivalent confirmed yet
+either. Share results on the [Discord](https://discord.gg/Zr72h6AFa5) or open a
+[GitHub Discussion](../../discussions) — see
+[Community & ideas](#-community--ideas) below.
 
 ---
 
@@ -731,7 +787,7 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 
 ```
 Sony-Alpha-OpenLab/
-├── cameras/             # per-body profiles (a6700, fx30, zve10m2) + cameras.py loader
+├── cameras/             # 14 BIONZ XR body profiles (USB identity) + cameras.py loader
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking

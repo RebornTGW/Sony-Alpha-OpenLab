@@ -1,0 +1,20 @@
+{
+  "name": "Sony A9 III",
+  "model": "ILCE-9M3",
+  "firmware_verified": null,
+  "sensor": "Full-Frame Global Shutter 24.6 MP",
+  "processor": "BIONZ XR",
+  "generation": "bionz_xr",
+  "usb": {
+    "vid": "0x054C",
+    "pid_pc_remote": null,
+    "interface_class": "0x06",
+    "connection_mode": "PC Remote"
+  },
+  "capture_handles": {
+    "pc_save": "0xFFFFC001",
+    "liveview": "0xFFFFC002"
+  },
+  "status": "placeholder, awaiting hardware",
+  "notes": "First full-frame global-shutter body. PID/model code to confirm on hardware."
+}

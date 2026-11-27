@@ -1,0 +1,45 @@
+{
+  "schema": "opengate-profile/1",
+  "name": "a7m4_v4.00",
+  "model": "ILCE-7M4",
+  "firmware": null,
+  "status": "experimental",
+  "verified_from": null,
+  "result_observed": null,
+  "summary": "Locked skeleton - NOT verified on hardware. No memory offsets yet: the A7 IV is a different (full-frame, 33 MP) sensor family from the A6700, so even the step shape here is a starting guess, not a confirmed match. Every write below is a placeholder pending --dump-ram (read candidate offsets off a real body) and --scan-dump (locate them from a target firmware dump against the verified A6700 profile's signatures). Do not run --confirm-ram-write against this file - it has zero resolved writes and the injector refuses that on purpose.",
+  "output": { "width": 0, "height": 0, "aspect": "unknown", "fps": [] },
+  "sensor": "Full-Frame 33 MP",
+  "region_bases": { "coprocessor": "0x0" },
+  "verify_rule": "Read every write's address first; each must equal its 'stock'. If any site differs, abort before writing one byte (wrong firmware or already patched). Not yet applicable here - there are no writes yet.",
+  "steps": [
+    {
+      "id": "L13",
+      "label": "raw write buffer (memory manager)",
+      "kind": "geometry",
+      "desc": "PENDING. On the verified A6700 this enlarges the raw write-buffer size words for a taller frame. Locate the equivalent site on this body via --scan-dump against the A6700 profile's L13 stock signature, then confirm the exact offset(s) with --dump-ram before adding any write here.",
+      "writes": []
+    },
+    {
+      "id": "L16",
+      "label": "encoder output size",
+      "kind": "geometry",
+      "desc": "PENDING. On the verified A6700 this sets the movie-writer output size word. Same approach as L13: --scan-dump to locate, --dump-ram to confirm, before adding any write here.",
+      "writes": []
+    },
+    {
+      "id": "S16",
+      "label": "screen / display fit",
+      "kind": "geometry",
+      "desc": "PENDING. On the verified A6700 this clears the letterbox fit and panel vertical-offset words. Same approach as L13: --scan-dump to locate, --dump-ram to confirm, before adding any write here.",
+      "writes": []
+    }
+  ],
+  "excluded": [
+    "L19"
+  ],
+  "notes": [
+    "L19 is deliberately excluded from this skeleton. On the verified A6700, the L19 (high-speed-only) encoder rebooted the kernel on the STILL->MOVIE switch (see ../RESEARCH.md) - M19 was the stable replacement there. Until an equivalent encoder path is dumped and read-only-verified on this body, do not add an L19-style step here.",
+    "This file ships with zero resolved writes on purpose - host-injector/src/inject.rs refuses --confirm-ram-write on any profile with no resolved writes, pointing back to --dump-ram / --scan-dump.",
+    "See the root README's \"Contributing a New BIONZ XR Body\" section for the full --dump-ram -> --scan-dump -> --verify-only workflow this skeleton is meant to be filled in by."
+  ]
+}

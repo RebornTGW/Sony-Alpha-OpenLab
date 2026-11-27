@@ -80,33 +80,88 @@ modification du firmware. Toute fonctionnalité future reste bornée à ces deux
 ## 📷 Boîtiers pris en charge & feuille de route
 
 La boîte à outils s'appuie sur le protocole distant Sony Alpha (PTP + extension
-vendor Sony « SDIO »), largement partagé dans la gamme. Le support est déployé par
-génération de processeur :
+vendor Sony « SDIO ») et sur le chemin de correctif RAM Open Gate, tous deux
+largement partagés sur la gamme **BIONZ XR**. 14 boîtiers BIONZ XR sont
+catalogués dans [`cameras/`](cameras/), groupés par famille de capteur (famille
+plus proche = disposition mémoire attendue plus proche de l'A6700 vérifié) :
 
-| Génération | Boîtiers | Support prévu |
+| Famille de capteur | Boîtiers | Statut |
 |---|---|---|
-| **BIONZ XR** (APS-C) | **A6700** ✅, **FX30**, **ZV-E10 II** | **Direct / prioritaire** — cible de développement principale |
-| **BIONZ XR** (Full-Frame) | A7 IV, A7C II, … | Direct (après validation APS-C) |
-| **BIONZ X** (APS-C) | A6600, A6400 | Support ultérieur (dialecte de protocole plus ancien) |
+| APS-C 26 MP (IMX571) | **A6700** ✅, FX30, ZV-E10 II | A6700 vérifié (fw 2.00) ; les autres attendent `--dump-ram` / `--scan-dump` |
+| Full-Frame 12,1 MP | A7S III, FX3, ZV-E1 | en attente de `--dump-ram` / `--scan-dump` |
+| Full-Frame 33 MP | A7 IV, A7C II, FX2 | en attente de `--dump-ram` / `--scan-dump` |
+| Full-Frame 61 MP | A7R V, A7CR | en attente de `--dump-ram` / `--scan-dump` |
+| Full-Frame Stacked / GS | A1, A1 II, A9 III | en attente de `--dump-ram` / `--scan-dump` |
 
-Priorité de développement :
+Les boîtiers **BIONZ X** plus anciens (A6400, A6600, ZV-E10 Mark I) sont une
+génération de protocole différente et ne sont pas encore catalogués ici.
 
-1. **Sony A6700** — boîtier de référence (développé et testé ici en premier).
-2. Autres boîtiers **BIONZ XR APS-C** (FX30, ZV-E10 II) — compatibilité directe attendue.
-3. **Full-Frame BIONZ XR** (A7 IV, A7C II…).
-4. Boîtiers **BIONZ X** (A6400, A6600) — traités ensuite, leur génération de
-   protocole étant différente.
+Deux catalogues distincts, volontairement :
 
-**Profils par boîtier** dans [`cameras/`](cameras/) (architecture modulaire Sony
-APS-C BIONZ XR) : **`a6700`** (principal), **`fx30`**, **`zve10m2`** — même capteur
-26 MP APS-C BIONZ XR. Chargement via `from cameras import load_profile`. Les boîtiers
-**BIONZ X** (A6400, A6600, ZV-E10 Mark I) viendront ensuite ; **ZV-E1 = Full-Frame**
-(à part).
+- **[`cameras/`](cameras/)** — identité USB (VID/PID, handles de capture) pour
+  les outils PTP/SDIO (`probe_a6700.py`, `experiment_a6700.py`,
+  `multi_exposure.py`). Chargement via `from cameras import load_profile`.
+- **[`profiles/`](profiles/)** (consommé par [`host-injector/`](host-injector/)) —
+  les tables de correctifs RAM Open Gate. Seul `profile_4k_24p_stable` est
+  vérifié ; les squelettes par boîtier (`fx30_v5.00`, `zve10m2_v1.00`,
+  `fx2_v1.00`, `fx3_v6.00`, `a7m4_v4.00`) sont **verrouillés** : vrais
+  identifiants d'étape, zéro écriture résolue, aucun offset inventé. Voir
+  ["Contribuer un nouveau boîtier BIONZ XR"](#-contribuer-un-nouveau-boîtier-bionz-xr)
+  ci-dessous.
 
-> ✅ = activement testé · autres = prévus. La compatibilité est validée boîtier par
-> boîtier ; la présence d'un code dans le protocole ne signifie pas qu'il est exposé
-> sur tous les modèles. Vous voulez votre boîtier pris en charge ? Voir
-> [Communauté & idées](#-communauté--idées).
+> ✅ = activement testé · autres = prévus/placeholder. La compatibilité est validée
+> boîtier par boîtier ; la présence d'un code dans le protocole ne signifie pas
+> qu'il est exposé sur tous les modèles, et les codes modèle/PID des boîtiers
+> non-A6700 sont à confirmer sur matériel réel. Vous voulez votre boîtier pris
+> en charge ? Voir [Communauté & idées](#-communauté--idées).
+
+---
+
+## 🛰️ Contribuer un nouveau boîtier BIONZ XR
+
+Un profil **squelette verrouillé** existe déjà dans [`profiles/`](profiles/) pour
+chaque boîtier en attente (`fx30_v5.00`, `zve10m2_v1.00`, `fx2_v1.00`,
+`fx3_v6.00`, `a7m4_v4.00`) : vrais identifiants d'étape (`L13`/`L16`/`S16`),
+`"status": "experimental"`, et **zéro écriture résolue** — aucun offset mémoire
+de ce dépôt n'a été deviné. `host-injector` refuse `--confirm-ram-write` sur un
+profil à zéro écriture résolue, donc ces squelettes ne présentent aucun risque
+tant que personne n'a encore touché le boîtier. Si vous avez un boîtier du
+tableau ci-dessus et voulez aider à localiser ses adresses, en lecture seule, en
+trois étapes :
+
+1. **`--dump-ram`** — une fois en session Senser sur *votre* boîtier (même
+   garde-fou `--allow-unverified-usb` que partout ailleurs), lisez une région
+   candidate dans un fichier local :
+   ```bash
+   cargo run -- --dump-ram 0x02580cd8 0x40 --out dump_votre_boitier.bin \
+     --senser-config senser_blobs.json --allow-unverified-usb
+   ```
+2. **`--scan-dump`** — entièrement hors-ligne, sans caméra : cherche dans un
+   dump firmware (le vôtre, ou un plus complet déjà en main) les signatures
+   d'octets « stock » du profil A6700 vérifié (`L13`/`L16`/`S16`), et produit un
+   profil brouillon avec les offsets trouvés :
+   ```bash
+   cargo run -- --scan-dump dump_votre_boitier.bin --ref-profile profile_4k_24p_stable.json \
+     --out brouillon_votre_boitier.json
+   ```
+   Une correspondance unique devient une écriture dans le brouillon ; une
+   correspondance ambiguë ou absente est signalée dans `notes` plutôt que
+   devinée — à résoudre à la main avant de leur faire confiance.
+3. **`--verify-only`** — fusionnez les écritures résolues du brouillon dans le
+   squelette de votre boîtier, puis confirmez que chaque site tient bien les
+   octets stock attendus **avant** que quiconque essaie `--confirm-ram-write` :
+   ```bash
+   cargo run -- votre_boitier_v1.00 --verify-only --senser-config senser_blobs.json --allow-unverified-usb
+   ```
+
+**N'ajoutez pas** d'étape équivalente à `L19` sur le profil d'un nouveau
+boîtier : sur l'A6700 vérifié, `L19` (l'encodeur high-speed uniquement) a
+redémarré le noyau au passage STILL→MOVIE (voir [`RESEARCH.md`](RESEARCH.md)) ;
+`M19` en était le remplaçant stable là-bas, et aucun boîtier non-A6700 n'a
+d'équivalent `M19` confirmé pour l'instant non plus. Partagez vos résultats sur
+le [Discord](https://discord.gg/Zr72h6AFa5) ou ouvrez une
+[discussion GitHub](../../discussions) — voir
+[Communauté & idées](#-communauté--idées) ci-dessous.
 
 ---
 
@@ -703,7 +758,7 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
 
 ```
 Sony-Alpha-OpenLab/
-├── cameras/             # profils par boîtier (a6700, fx30, zve10m2) + loader cameras.py
+├── cameras/             # 14 profils de boîtiers BIONZ XR (identité USB) + loader cameras.py
 ├── probe_a6700.py       # sonde diagnostic USB lecture seule
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # capture multi-exposition automatisée + empilement optionnel
