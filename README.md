@@ -902,7 +902,15 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 - [`docs/BIONZ_XR_PTP_SDIO.md`](docs/BIONZ_XR_PTP_SDIO.md) — why the legacy
   BIONZ X Senser path stalls on BIONZ XR, the verified PTP/SDIO v300 handshake
   and `0x9209` property-record format, and the `sdio_probe.py` read-only
-  decoder (`--dump-bin` / `--parse-bin` / `--json`).
+  decoder (`--dump-bin` / `--parse-bin` / `--json`). Also documents that
+  `0x9202` is a static capability manifest (same 351-property/57-control-code
+  lists in Photo and Video) and the per-mode `0x9209` state findings
+  (`0xD211` lock, `0xD0FA`–`0xD0FF` Photo/Video toggle, linked
+  format↔fps properties).
+- [`docs/BIONZ_XR_SD_CAMSET.md`](docs/BIONZ_XR_SD_CAMSET.md) — SD card
+  layout and the `CAMSETxx.DAT` settings-profile binary format: the verified
+  11,715-entry TLV walk, the trailer's little-endian `param_id` (not a
+  checksum), and byte-diffs across four real saved profiles.
 - [`docs/DEVICE_PROPERTIES.en.md`](docs/DEVICE_PROPERTIES.en.md) (EN) /
   [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) (FR)
   — full table of the **386** `DevicePropCode` / control codes.
@@ -938,6 +946,7 @@ Sony-Open-Gate-Lab/
 │   ├── DEVICE_PROPERTIES.en.md / .md             # 386-code table (EN / FR)
 │   ├── RESULTS.en.md / RESULTS.md                # live experimental results (EN / FR)
 │   ├── BIONZ_XR_PTP_SDIO.md                      # PTP/SDIO v300 handshake + 0x9209 format
+│   ├── BIONZ_XR_SD_CAMSET.md                     # SD card layout + CAMSETxx.DAT TLV format
 │   ├── ROADMAP.en.md / ROADMAP.md                # milestones & next steps (EN / FR)
 │   └── proofs/                                   # anonymized log extracts + proof screenshots
 └── README.md / README.fr.md                      # this file (EN / FR)

@@ -875,6 +875,15 @@ Merci de lire [`CONTRIBUTING.fr.md`](CONTRIBUTING.fr.md) avant d'ouvrir une pull
   multi-exposition, verrou HAITA 3:2).
 - [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (FR) / [`docs/PROTOCOL.en.md`](docs/PROTOCOL.en.md) (EN)
   — architecture du protocole PTP / « SDIO ».
+- [`docs/BIONZ_XR_PTP_SDIO.md`](docs/BIONZ_XR_PTP_SDIO.md) (EN) — pourquoi le
+  chemin Senser historique (BIONZ X) échoue sur BIONZ XR, la négociation
+  PTP/SDIO v300 vérifiée, le format des enregistrements `0x9209`, et les
+  constats par mode (`0x9202` = manifeste statique, verrou `0xD211`,
+  bascule `0xD0FA`-`0xD0FF` Photo/Vidéo).
+- [`docs/BIONZ_XR_SD_CAMSET.md`](docs/BIONZ_XR_SD_CAMSET.md) (EN) — format
+  binaire des profils `CAMSETxx.DAT` de la carte SD : parcours TLV vérifié
+  (11 715 entrées), l'`param_id` en fin de flux (pas une somme de contrôle),
+  et les diffs entre quatre profils réels.
 - [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) (FR) /
   [`docs/DEVICE_PROPERTIES.en.md`](docs/DEVICE_PROPERTIES.en.md) (EN)
   — table complète des **386 codes** `DevicePropCode` / contrôle.
@@ -901,6 +910,8 @@ Sony-Open-Gate-Lab/
 ├── CONTRIBUTING.md / CONTRIBUTING.fr.md   # guide de contribution (EN / FR)
 ├── docs/
 │   ├── PROTOCOL.md / PROTOCOL.en.md              # architecture protocole (FR / EN)
+│   ├── BIONZ_XR_PTP_SDIO.md                      # négociation PTP/SDIO v300 + format 0x9209 (EN)
+│   ├── BIONZ_XR_SD_CAMSET.md                     # carte SD + format TLV CAMSETxx.DAT (EN)
 │   ├── DEVICE_PROPERTIES.md / .en.md             # table des 386 codes (FR / EN)
 │   ├── RESULTS.md / RESULTS.en.md                # résultats expérimentaux en direct (FR / EN)
 │   ├── ROADMAP.md / ROADMAP.en.md                # jalons & prochaines étapes (FR / EN)
