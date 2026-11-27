@@ -10,9 +10,10 @@
 //!      proven on a real A6700.
 //!   2. a runtime `allow_unverified` flag (CLI `--allow-unverified-usb`, with an
 //!      interactive confirm) lets a tester send real frames without recompiling.
-//! Even when ungated, steps whose bytes are NOT in the public source (the Senser
-//! auth keys and the shell exec tokens - see GAPS) refuse rather than guess. No
-//! fabricated vendor bytes are ever put on the wire.
+//! Even when ungated, steps whose data is EXTERNAL (the Senser key tables + the
+//! SHA1-path hash, and the senser bulk backend) refuse rather than guess. There is
+//! no `ShellExec` opcode in PMCA-RE: a binary runs via the `SHEL` interactive relay.
+//! No fabricated vendor bytes are ever put on the wire.
 
 use crate::descriptor::{build_blob, PatchRecord};
 use crate::scsi::{BulkPipe, MscBot};
@@ -69,17 +70,60 @@ pub mod vendor {
     pub const FILE_DELETE: u16 = 3;
     /// `MemoryDumpHeader` = base INT32, size INT32 (the RAM read path).
 
+    // --- Senser auth handshake (pmca/usb/sony.py, SonySenserAuthDevice) ----------
+    /// `AuthPacket` (BIG_ENDIAN) = cmd INT16, salt INT16, data STR(0x200) -> 516 B.
+    pub const AUTH_DATA_LEN: usize = 0x200;
+    pub const AUTH_PACKET_LEN: usize = 2 + 2 + AUTH_DATA_LEN; // 516
+    /// `_sendAuthPacket` sends cmd as `~cmd & 0xffff`, salt always 0; the reply code
+    /// is `(~resp.cmd & 0xffff) - resp.salt`.
+    pub const AUTH_CMD_CHALLENGE: u16 = 1; // reply 2 (SHA1) or 8 (SHA256)
+    pub const AUTH_CMD_RESPONSE: u16 = 3; // body = 0x01 + hash; reply must be 4
+    pub const AUTH_CMD_FINISH: u16 = 5; // reply must be 6, then data[0] == 1
+    pub const AUTH_REPLY_SHA1: u16 = 2;
+    pub const AUTH_REPLY_SHA256: u16 = 8;
+    pub const AUTH_REPLY_RESPONSE_OK: u16 = 4;
+    pub const AUTH_REPLY_FINISH_OK: u16 = 6;
+    pub const AUTH_ROUNDS: usize = 3;
+    // The round key `senserKeysSha1[i]`/`senserKeysSha256[i]` is appended to `data`
+    // only when the live PID is 0x0336; the hash is `crypto.sha1_faulty` (SHA1 path)
+    // or SHA256. See EXTERNAL below - the keys and sha1_faulty are not embedded here.
+
+    // --- Updater/camera shell (pmca/platform/backend/usb/__init__.py) ------------
+    /// Shell feature id passed to sendSonyExtCommand (so the MSC CDB is
+    /// `0x7a` + LE32(0x23) + 7 zeros). `USB_FEATURE_SHELL = 0x23`.
+    pub const USB_FEATURE_SHELL: u32 = 0x23;
+    /// `UsbShellRequest` = cmd STR(4) + data STR(0xfff8). `UsbShellResponse` = result
+    /// INT32; failure when `result & 0x80000000`.
+    pub const SHELL_DATA_MAX: usize = 0xfff8;
+    pub const SHELL_RESULT_ERROR_BIT: u32 = 0x8000_0000;
+    /// 4-byte ASCII shell command tokens (verbatim from UsbPlatformBackend).
+    pub const SHELL_TEST: &[u8; 4] = b"TEST"; // start() probe
+    pub const SHELL_SHEL: &[u8; 4] = b"SHEL"; // interactive shell (how a binary is run)
+    pub const SHELL_PUSH: &[u8; 4] = b"PUSH"; // writeFile(path): PUSH + usb_transfer_write
+    pub const SHELL_PULL: &[u8; 4] = b"PULL"; // readFile(path): PULL (returns size) + read
+    pub const SHELL_RMEM: &[u8; 4] = b"RMEM"; // readMemory(offset,size)
+    pub const SHELL_EXIT: &[u8; 4] = b"EXIT"; // stop()
+    /// `UsbMemoryReadRequest` = offset INT32, size INT32 (the RMEM body).
+    /// `UsbSequenceTransferHeader` = sequence INT32 (prefixes each transfer message).
+    /// `UsbDataMsg` = size INT32 + data STR(0xfff8); `UsbStatusMsg` = status INT32
+    /// (USB_STATUS_EOF = 1). Endianness of these is the pmca/util default (not
+    /// fetched); assumed little-endian - flagged where it matters.
+    pub const USB_STATUS_EOF: u32 = 1;
+
     // --- Our convention for the on-camera files (RAM disk) ----------------------
     pub const HELPER_PATH: &str = "/tmp/libogpatch.so";
     pub const BLOB_PATH: &str = "/tmp/ogpatch.bin";
     pub const RESULT_PATH: &str = "/tmp/ogresult.bin";
 
-    // --- GAPS: present in Sony-PMCA-RE but NOT in the files we could fetch -------
-    // * Senser auth keys: `constants.senserKeysSha1` / `senserKeysSha256` + the
-    //   3-round `AuthPacket` handshake -> service mode cannot complete without them.
-    // * The camera-shell run/exec tokens live in pmca/platform (CameraShell /
-    //   UsbPlatformBackend), not fetched -> executing libogpatch.so is not covered.
-    // These are why VENDOR_PROTOCOL_VERIFIED stays false and the steps below gap.
+    // --- EXTERNAL (MIT, present in Sony-PMCA-RE, NOT embedded in this repo) -------
+    // * Senser key tables: `pmca/usb/constants.py` -> `senserKeysSha1` /
+    //   `senserKeysSha256`, each a list of 3 opaque byte blobs (hundreds of bytes;
+    //   SHA1 entries longer than SHA256). Reused by index 0..2 per auth round.
+    // * `crypto.sha1_faulty` (pmca/usb/crypto.py) - the SHA1-path hash function.
+    // * The senser bulk transport lives in `pmca/platform/backend/senser.py`.
+    // These are referenced, not copied; supply them locally to run auth for real.
+    // There is NO dedicated "ShellExec" opcode: a binary is run via the `SHEL`
+    // interactive shell relay (pmca/shell/interactive.py, 127.0.0.1:5005).
 }
 
 // ----------------------- pure vendor frame builders ------------------------- //
@@ -136,11 +180,51 @@ pub fn senser_memdump_frame(base: u32, size: u32, sequence: u16) -> Vec<u8> {
     senser_wrap(vendor::PFUNC_MEMORY_DUMP, sequence, &body)
 }
 
-fn gap(what: &str, missing: &str) -> Error {
-    Error::Usb(format!(
-        "{what}: not reproducible from the public MIT source - {missing} is not in \
-         the ma1co/Sony-PMCA-RE files fetched. No fabricated bytes will be sent."
-    ))
+/// Senser AuthPacket (BIG_ENDIAN): cmd INT16 (sent as `~cmd & 0xffff`), salt INT16
+/// (always 0), data STR(0x200) NUL-padded / truncated. Total 516 bytes.
+pub fn auth_packet(cmd: u16, data: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(vendor::AUTH_PACKET_LEN);
+    f.extend_from_slice(&(!cmd).to_be_bytes()); // ~cmd & 0xffff, big-endian
+    f.extend_from_slice(&0u16.to_be_bytes()); // salt = 0
+    let mut d = data.to_vec();
+    d.resize(vendor::AUTH_DATA_LEN, 0); // pad / truncate to 0x200
+    f.extend_from_slice(&d[..vendor::AUTH_DATA_LEN]);
+    f
+}
+
+/// Decode an AuthPacket reply code: `(~resp.cmd & 0xffff) - resp.salt` (big-endian).
+pub fn auth_reply_code(reply: &[u8]) -> Option<u16> {
+    if reply.len() < 4 {
+        return None;
+    }
+    let cmd = u16::from_be_bytes([reply[0], reply[1]]);
+    let salt = u16::from_be_bytes([reply[2], reply[3]]);
+    Some((!cmd).wrapping_sub(salt))
+}
+
+/// Updater-shell request: 4-byte token + data NUL-padded to 0xfff8
+/// (`UsbShellRequest`). Carried over USB_FEATURE_SHELL (0x23).
+pub fn shell_request(token: &[u8; 4], data: &[u8]) -> Vec<u8> {
+    let mut f = Vec::with_capacity(4 + vendor::SHELL_DATA_MAX);
+    f.extend_from_slice(token);
+    let mut d = data.to_vec();
+    d.resize(vendor::SHELL_DATA_MAX, 0);
+    f.extend_from_slice(&d[..vendor::SHELL_DATA_MAX]);
+    f
+}
+
+/// RMEM body: `UsbMemoryReadRequest` = offset INT32, size INT32. Endianness is the
+/// pmca/util default (unverified); little-endian assumed.
+pub fn mem_read_request(offset: u32, size: u32) -> [u8; 8] {
+    let mut b = [0u8; 8];
+    b[0..4].copy_from_slice(&offset.to_le_bytes());
+    b[4..8].copy_from_slice(&size.to_le_bytes());
+    b
+}
+
+/// `UsbSequenceTransferHeader` = sequence INT32 (prefixes each transfer message).
+pub fn seq_header(sequence: u32) -> [u8; 4] {
+    sequence.to_le_bytes()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,23 +239,17 @@ pub struct ServiceLink<P: BulkPipe> {
     bot: MscBot<P>,
     pub state: LinkState,
     allow_unverified: bool,
-    seq: u16,
 }
 
 impl<P: BulkPipe> ServiceLink<P> {
     pub fn new(bot: MscBot<P>) -> Self {
-        Self { bot, state: LinkState::MassStorage, allow_unverified: false, seq: 0 }
+        Self { bot, state: LinkState::MassStorage, allow_unverified: false }
     }
 
     /// Let a tester send real vendor frames without recompiling (CLI
     /// `--allow-unverified-usb`). Off by default.
     pub fn set_allow_unverified(&mut self, allow: bool) {
         self.allow_unverified = allow;
-    }
-
-    fn next_seq(&mut self) -> u16 {
-        self.seq = self.seq.wrapping_add(1);
-        self.seq
     }
 
     /// The two-stage gate: compile-time verified OR runtime opt-in.
@@ -199,41 +277,63 @@ impl<P: BulkPipe> ServiceLink<P> {
         Ok(())
     }
 
-    /// Step 2: enter service (senser) mode. The camera re-enumerates to a PID_SENSER
-    /// device after a vendor-request start + a keyed auth handshake.
+    /// Step 2: enter service (senser) mode. Framing is modelled (AuthPacket, the
+    /// 3-round challenge/response from SonySenserAuthDevice.authenticate), but the
+    /// round keys and the SHA1-path hash are external (see EXTERNAL in `vendor`).
     pub fn enter_service(&mut self) -> Result<()> {
         self.gate("enter_service")?;
-        // VREQ_START_SENSER would go here, but the auth handshake cannot complete:
-        Err(gap(
-            "enter_service",
-            "the Senser auth keys (constants.senserKeysSha1/senserKeysSha256) and the \
-             3-round AuthPacket handshake",
+        // Round 1 challenge would be sent as this packet (cmd 1):
+        let _challenge = auth_packet(vendor::AUTH_CMD_CHALLENGE, &[]);
+        Err(Error::Usb(
+            "enter_service: handshake framing is ready (pmca/usb/sony.py \
+             SonySenserAuthDevice: AuthPacket, _sendAuthPacket, authenticate), but the \
+             round keys `senserKeysSha1`/`senserKeysSha256` (pmca/usb/constants.py) and \
+             `crypto.sha1_faulty` (pmca/usb/crypto.py) are external MIT data, not \
+             embedded here. Supply them locally to complete auth."
+                .into(),
         ))
     }
 
-    /// Step 3a: upload the compiled helper to the camera RAM disk (Senser FileControl
-    /// WRITE). Frame building is implemented; the Senser transport/exec is a GAP.
+    /// Step 3a: push the compiled helper to the camera (updater shell `PUSH`, then
+    /// usb_transfer_write). Request framing is built; the send needs a connected shell.
     pub fn upload_helper(&mut self, so_bytes: &[u8]) -> Result<()> {
         self.gate("upload_helper")?;
-        let _frame = senser_file_frame(vendor::FILE_WRITE, vendor::HELPER_PATH, so_bytes, self.next_seq());
-        Err(gap("upload_helper", "the Senser bulk transport (pmca/platform backend)"))
-    }
-
-    /// Step 3b: write the OGP1 blob, run the helper, read its result code.
-    pub fn apply_blob(&mut self, blob: &[u8]) -> Result<()> {
-        self.gate("apply_blob")?;
-        let _wr = senser_file_frame(vendor::FILE_WRITE, vendor::BLOB_PATH, blob, self.next_seq());
-        Err(gap(
-            "apply_blob",
-            "the camera-shell exec token (pmca/platform CameraShell run/exec)",
+        let _req = shell_request(vendor::SHELL_PUSH, vendor::HELPER_PATH.as_bytes());
+        let _ = so_bytes; // body streams via usb_transfer_write (transfer.py UsbDataMsg)
+        Err(Error::Usb(
+            "upload_helper: PUSH framing is ready (pmca/platform/backend/usb \
+             UsbPlatformBackend.writeFile, token b'PUSH'), but it needs a connected \
+             shell (token b'TEST'), which needs service mode - blocked on enter_service."
+                .into(),
         ))
     }
 
-    /// Ask the camera to dump a RAM region (Senser MemoryDump). GAP: Senser transport.
+    /// Step 3b: PUSH the OGP1 blob, then run the helper. NOTE: there is no exec
+    /// opcode - a binary runs via the `SHEL` interactive relay.
+    pub fn apply_blob(&mut self, blob: &[u8]) -> Result<()> {
+        self.gate("apply_blob")?;
+        let _push = shell_request(vendor::SHELL_PUSH, vendor::BLOB_PATH.as_bytes());
+        let _ = blob;
+        let _shel = shell_request(vendor::SHELL_SHEL, &[]);
+        Err(Error::Usb(
+            "apply_blob: no ShellExec opcode exists in PMCA-RE; a binary is run via the \
+             b'SHEL' interactive relay (pmca/shell/interactive.py). That needs a \
+             connected shell (enter_service first)."
+                .into(),
+        ))
+    }
+
+    /// Read a RAM region back (updater shell `RMEM`, UsbMemoryReadRequest). Framing is
+    /// built; the send needs a connected shell.
     fn read_ram(&mut self, addr: u64, len: usize) -> Result<Vec<u8>> {
         self.gate("read_ram")?;
-        let _frame = senser_memdump_frame(addr as u32, len as u32, self.next_seq());
-        Err(gap("read_ram", "the Senser bulk transport (pmca/platform backend)"))
+        let _req = shell_request(vendor::SHELL_RMEM, &mem_read_request(addr as u32, len as u32));
+        Err(Error::Usb(
+            "read_ram: RMEM framing is ready (pmca/platform/backend/usb \
+             UsbPlatformBackend.readMemory, token b'RMEM'), but it needs a connected \
+             shell - blocked on enter_service."
+                .into(),
+        ))
     }
 }
 
@@ -320,7 +420,44 @@ mod tests {
         assert!(matches!(e1, Error::Usb(ref s) if s.contains("guarded")));
         link.set_allow_unverified(true);
         let e2 = link.enter_service().unwrap_err();
-        // ungated, but still refuses because the auth keys are a documented GAP.
-        assert!(matches!(e2, Error::Usb(ref s) if s.contains("auth keys")));
+        // ungated, but still refuses because the round keys are external (EXTERNAL).
+        assert!(matches!(e2, Error::Usb(ref s) if s.contains("senserKeys")));
+    }
+
+    #[test]
+    fn auth_packet_is_516_be_complemented_cmd() {
+        let p = auth_packet(vendor::AUTH_CMD_CHALLENGE, b"hi");
+        assert_eq!(p.len(), vendor::AUTH_PACKET_LEN); // 516
+        // cmd sent as ~cmd & 0xffff, big-endian
+        assert_eq!(&p[0..2], &(!vendor::AUTH_CMD_CHALLENGE).to_be_bytes());
+        assert_eq!(&p[2..4], &0u16.to_be_bytes()); // salt 0
+        assert_eq!(&p[4..6], b"hi"); // data, then NUL padding
+        assert_eq!(p[6], 0);
+    }
+
+    #[test]
+    fn auth_reply_code_decodes() {
+        // reply cmd=~2, salt=0 -> code 2 (SHA1 path)
+        let mut r = Vec::new();
+        r.extend_from_slice(&(!2u16).to_be_bytes());
+        r.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(auth_reply_code(&r), Some(2));
+    }
+
+    #[test]
+    fn shell_request_token_and_pad() {
+        let req = shell_request(vendor::SHELL_PUSH, b"/tmp/x");
+        assert_eq!(req.len(), 4 + vendor::SHELL_DATA_MAX);
+        assert_eq!(&req[0..4], b"PUSH");
+        assert_eq!(&req[4..10], b"/tmp/x");
+        assert_eq!(req[10], 0); // NUL padded
+    }
+
+    #[test]
+    fn mem_read_request_packs_le() {
+        let b = mem_read_request(0x4010_0000, 0x40);
+        assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0x4010_0000);
+        assert_eq!(u32::from_le_bytes([b[4], b[5], b[6], b[7]]), 0x40);
+        assert_eq!(seq_header(7), 7u32.to_le_bytes());
     }
 }

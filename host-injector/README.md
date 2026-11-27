@@ -37,10 +37,14 @@ cargo run -- profile_4k_24p_stable --video-standard NTSC --dial MOVIE   # plan +
 The Sony USB vendor framing (MSC vendor CDB `0x7a`, `ExtCmdHeader`, Senser service
 mode + FileControl/MemoryDump, the service PIDs) is transcribed **clean-room** from
 the public MIT project [`ma1co/Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE),
-cited by file + symbol in the source. Two pieces are **gaps** not in the fetched
-files — the Senser auth keys and the camera-shell exec tokens (both under
-`pmca/platform`) — so the end-to-end path cannot complete from public MIT alone, and
-those steps refuse rather than guess.
+cited by file + symbol in the source. The updater-shell framing (feature `0x23`,
+tokens `TEST`/`SHEL`/`PUSH`/`PULL`/`RMEM`, the sequence transfer) and the Senser auth
+handshake shape are modelled. A few pieces stay **external** (MIT, in PMCA-RE but not
+copied here): the Senser key tables (`pmca/usb/constants.py` `senserKeysSha1`/
+`senserKeysSha256`), `crypto.sha1_faulty`, and the senser bulk backend
+(`pmca/platform/backend/senser.py`). There is **no `ShellExec` opcode** — a binary is
+run via the `SHEL` interactive relay. So the end-to-end path cannot complete from
+public MIT alone, and those steps refuse rather than guess.
 
 Two gates protect the camera:
 - `VENDOR_PROTOCOL_VERIFIED` (compile-time) stays `false` until proven on a real A6700.
