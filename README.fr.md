@@ -533,8 +533,14 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 
 # Aperçu fantôme manuel : index webcam, vidéo ou dossier d'images
 python multi_exposure.py --live-ghost --source 0 --shots 3 --mode avg
-# Aperçu hors ligne ; Espace fige, R réinitialise, Q quitte
+# Aperçu hors ligne (un .ARW montre son aperçu JPEG embarqué) ;
+# Espace fige, S sauve en avance (>= 2 prises), R réinitialise, Q quitte
 python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
+
+# --live-ghost + -o : un dossier de .ARW + une sortie .tiff lance l'empilement
+# RAW 16 bits linéaire complet (blend_raw_files) une fois --shots atteint ou
+# via S ; toute autre combinaison source/sortie sauve l'aperçu composité
+python multi_exposure.py --live-ghost --source ./raw_frames --shots 3 --mode add -o out/ghost.tiff
 ```
 
 | Option | Rôle |
@@ -548,7 +554,8 @@ python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
 | `--stack-all` | rend les 4 modes Fujifilm de base à partir des mêmes vues |
 | `--interactive` / `--manual-step` | pas-à-pas : `[Entrée]` suivante / `[r]` refaire la dernière / `[q]` finir & fusionner |
 | `--live-overlay` / `--overlay-opacity` | fenêtre live superposant le flux (`0xFFFFC002`) sur la Vue 1 ; Espace déclenche |
-| `--live-ghost` / `--source` | aperçu OpenCV depuis une webcam (p. ex. `0`), vidéo ou dossier d'images ; `--shots` de 2 à 9 ; Espace capture, `R` réinitialise, `Q` quitte |
+| `--live-ghost` / `--source` | aperçu OpenCV depuis une webcam (p. ex. `0`), vidéo ou dossier d'images (`.ARW` via son aperçu JPEG embarqué) ; `--shots` de 2 à 9 ; Espace capture, `S` sauve en avance, `R` réinitialise, `Q` quitte |
+| `-o` / `--output` | avec `--raw-blend` : sortie `.tiff` requise. Avec `--live-ghost` : facultative - sauvée en atteignant `--shots` ou via `S` ; un empilement RAW `.tiff` si chaque prise était un `.ARW`, sinon l'aperçu composité |
 
 **Expérience double exposition native.** `--interactive` reproduit le flux Fujifilm :
 prendre la Vue 1, puis pour chaque vue suivante choisir `[Entrée]` pour déclencher,
@@ -560,9 +567,22 @@ dépendance supplémentaire.
 
 `--live-ghost` est un aperçu manuel séparé, depuis une webcam/UVC ou une vidéo/un
 dossier d'images hors ligne. Il superpose la vue courante aux prises mémorisées et
-affiche le HUD `Manual k/N exp. [mode]`. Installez la dépendance facultative avec
-`pip install opencv-python` ; **Espace** fige une prise, **R** réinitialise et **Q**
-quitte. Modes disponibles : `dark`, `bright`, `avg` et `add`.
+affiche le HUD `Manual k/N exp. [mode]`. Un dossier de fichiers Sony `.ARW` fonctionne
+aussi : l'aperçu JPEG embarqué de chacun (`extract_thumb()` de `rawpy`) est décodé pour
+la fenêtre live — un fichier sans aperçu JPEG, ou `rawpy` absent, est ignoré avec un
+message clair plutôt que de faire échouer toute la session. Installez les dépendances
+facultatives avec `pip install opencv-python rawpy` ; **Espace** fige une prise, **S**
+sauve en avance (nécessite `-o` et >= 2 prises), **R** réinitialise et **Q** quitte.
+Modes disponibles : `dark`, `bright`, `avg` et `add`.
+
+**Sauvegarder un résultat `--live-ghost` (`-o`).** Atteindre `--shots` sauve
+automatiquement (puis termine la session, comme `S` immédiatement suivi de `Q`) ; `S`
+sauve en avance dès 2 prises capturées, sans terminer la session. Ce qui est écrit
+dépend des sources capturées : si chacune était un fichier `.ARW` (cas du dossier de
+RAW) *et* que `-o` finit en `.tiff`, la sauvegarde lance le même empilement RAW 16 bits
+linéaire pleine résolution (`blend_raw_files`) que `--raw-blend` - pas l'aperçu JPEG
+basse résolution. Tout autre cas (webcam/vidéo, mélange, ou sortie non-`.tiff`) sauve
+l'image composite qu'OpenCV a déjà à l'écran.
 
 **Téléchargement auto (PC Remote).** En mode PC Remote, l'A6700 n'expose pas
 `GetObjectHandles` ; il place la dernière image capturée sur le handle Sony spécial

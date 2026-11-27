@@ -10,6 +10,8 @@ import contextlib
 import io
 import os
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -233,14 +235,14 @@ class TestLiveGhostCLI(unittest.TestCase):
                 self.run_cli("--live-ghost", "--source", "0", "--shots", "5",
                              "--mode", "bright")
         self.assertEqual(exc.exception.code, 0)
-        ghost.assert_called_once_with("0", 5, "bright")
+        ghost.assert_called_once_with("0", 5, "bright", output=None)
 
     def test_defaults_to_webcam_and_average_mode(self):
         with mock.patch.object(me, "live_ghost", return_value=True) as ghost:
             with self.assertRaises(SystemExit) as exc:
                 self.run_cli("--live-ghost", "--shots", "2")
         self.assertEqual(exc.exception.code, 0)
-        ghost.assert_called_once_with("0", 2, "avg")
+        ghost.assert_called_once_with("0", 2, "avg", output=None)
 
     def test_requires_two_to_nine_shots(self):
         for shots in ("1", "10"):
@@ -264,6 +266,227 @@ class TestLiveGhostDependencies(unittest.TestCase):
             ok = me.live_ghost("0", 2, "avg")
         self.assertFalse(ok)
         self.assertIn("pip install opencv-python", output.getvalue())
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestLiveGhostRawPreviews(unittest.TestCase):
+    def make_cv2(self, frame):
+        cv2 = mock.Mock()
+        cv2.IMREAD_COLOR = 1
+        cv2.FONT_HERSHEY_SIMPLEX = 0
+        cv2.LINE_AA = 16
+        cv2.waitKey.side_effect = [ord("q")]
+        cv2.imread.return_value = frame
+        cv2.imdecode.return_value = frame
+        return cv2
+
+    def test_decodes_embedded_jpeg_preview_from_arw(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        cv2 = self.make_cv2(frame)
+        raw = mock.Mock()
+        raw.extract_thumb.return_value = SimpleNamespace(format=1, data=b"jpeg")
+        raw_context = mock.MagicMock()
+        raw_context.__enter__.return_value = raw
+        raw_context.__exit__.return_value = False
+        rawpy = mock.Mock()
+        rawpy.imread.return_value = raw_context
+        rawpy.ThumbFormat.JPEG = 1
+        rawpy.LibRawError = type("LibRawError", (Exception,), {})
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "frame.ARW")
+            with open(path, "wb"):
+                pass
+            with mock.patch.dict(sys.modules, {"cv2": cv2, "rawpy": rawpy}):
+                self.assertTrue(me.live_ghost(directory, 2, "avg"))
+
+        rawpy.imread.assert_called_once_with(path)
+        raw.extract_thumb.assert_called_once_with()
+        cv2.imdecode.assert_called_once()
+        cv2.imshow.assert_called_once()
+
+    def test_skips_arw_and_continues_when_rawpy_is_missing(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        cv2 = self.make_cv2(frame)
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            with open(os.path.join(directory, "frame.ARW"), "wb"):
+                pass
+            with open(os.path.join(directory, "fallback.jpg"), "wb"):
+                pass
+            with mock.patch.dict(sys.modules, {"cv2": cv2, "rawpy": None}), \
+                    contextlib.redirect_stdout(output):
+                self.assertTrue(me.live_ghost(directory, 2, "avg"))
+
+        cv2.imread.assert_called_once_with(os.path.join(directory, "fallback.jpg"))
+        self.assertIn("skipping .ARW previews", output.getvalue())
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestSaveGhostResult(unittest.TestCase):
+    """_save_ghost_result() is the --live-ghost -o dispatch: RAW stack via
+    blend_raw_files() when every captured source is an .ARW path and the
+    output is .tiff, else cv2.imwrite() of the already-composited preview."""
+
+    def setUp(self):
+        self.preview = np.zeros((2, 2, 3), dtype=np.uint8)
+
+    def test_all_arw_sources_and_tiff_output_runs_raw_stack(self):
+        with mock.patch.object(me, "blend_raw_files", return_value=True) as blend, \
+                mock.patch("cv2.imwrite") as imwrite:
+            ok = me._save_ghost_result(
+                self.preview, ["a.arw", "b.ARW"], "out.tiff", "avg")
+        self.assertTrue(ok)
+        blend.assert_called_once_with(["a.arw", "b.ARW"], "out.tiff", mode="avg")
+        imwrite.assert_not_called()
+
+    def test_non_tiff_output_falls_back_to_preview_even_with_arw_sources(self):
+        with mock.patch.object(me, "blend_raw_files") as blend, \
+                mock.patch("cv2.imwrite", return_value=True) as imwrite:
+            ok = me._save_ghost_result(
+                self.preview, ["a.arw", "b.arw"], "out.png", "avg")
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        imwrite.assert_called_once_with("out.png", self.preview)
+
+    def test_non_arw_sources_fall_back_to_preview(self):
+        with mock.patch.object(me, "blend_raw_files") as blend, \
+                mock.patch("cv2.imwrite", return_value=True) as imwrite:
+            ok = me._save_ghost_result(
+                self.preview, ["a.jpg", "b.jpg"], "out.tiff", "avg")
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        imwrite.assert_called_once_with("out.tiff", self.preview)
+
+    def test_mixed_arw_and_non_arw_sources_fall_back_to_preview(self):
+        with mock.patch.object(me, "blend_raw_files") as blend, \
+                mock.patch("cv2.imwrite", return_value=True) as imwrite:
+            ok = me._save_ghost_result(
+                self.preview, ["a.arw", "b.jpg"], "out.tiff", "avg")
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        imwrite.assert_called_once()
+
+    def test_no_sources_falls_back_to_preview(self):
+        with mock.patch.object(me, "blend_raw_files") as blend, \
+                mock.patch("cv2.imwrite", return_value=True) as imwrite:
+            ok = me._save_ghost_result(self.preview, [], "out.tiff", "avg")
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        imwrite.assert_called_once()
+
+    def test_imwrite_failure_is_reported(self):
+        output = io.StringIO()
+        with mock.patch("cv2.imwrite", return_value=False), \
+                contextlib.redirect_stdout(output):
+            ok = me._save_ghost_result(self.preview, [], "out.png", "avg")
+        self.assertFalse(ok)
+        self.assertIn("failed to write", output.getvalue())
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestLiveGhostOutput(unittest.TestCase):
+    """End-to-end --live-ghost -o behavior: reaching --shots auto-saves (and
+    ends the session); [S] saves early once >= 2 shots are captured."""
+
+    def make_cv2(self, frame, keys):
+        cv2 = mock.Mock()
+        cv2.IMREAD_COLOR = 1
+        cv2.FONT_HERSHEY_SIMPLEX = 0
+        cv2.LINE_AA = 16
+        cv2.waitKey.side_effect = keys
+        cv2.imread.return_value = frame
+        cv2.imdecode.return_value = frame
+        cv2.resize.side_effect = lambda img, size: img
+        cv2.imwrite.return_value = True
+        cv2.VideoCapture.return_value.isOpened.return_value = True
+        cv2.VideoCapture.return_value.read.return_value = (True, frame)
+        return cv2
+
+    def arw_folder(self, directory, name="frame.ARW"):
+        path = os.path.join(directory, name)
+        with open(path, "wb"):
+            pass
+        return path
+
+    def make_rawpy(self, frame_bytes=b"jpeg"):
+        raw = mock.Mock()
+        raw.extract_thumb.return_value = SimpleNamespace(format=1, data=frame_bytes)
+        raw_context = mock.MagicMock()
+        raw_context.__enter__.return_value = raw
+        raw_context.__exit__.return_value = False
+        rawpy = mock.Mock()
+        rawpy.imread.return_value = raw_context
+        rawpy.ThumbFormat.JPEG = 1
+        rawpy.LibRawError = type("LibRawError", (Exception,), {})
+        return rawpy
+
+    def test_reaching_shots_auto_saves_raw_stack_and_ends_session(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        # SPACE, SPACE -> reaches shots=2 and auto-saves/ends; no quit needed.
+        cv2 = self.make_cv2(frame, [ord(" "), ord(" ")])
+        rawpy = self.make_rawpy()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.arw_folder(directory)
+            with mock.patch.dict(sys.modules, {"cv2": cv2, "rawpy": rawpy}), \
+                    mock.patch.object(me, "blend_raw_files", return_value=True) as blend:
+                ok = me.live_ghost(directory, 2, "avg", output="out.tiff")
+        self.assertTrue(ok)
+        blend.assert_called_once_with([path, path], "out.tiff", mode="avg")
+
+    def test_s_key_saves_early_with_two_or_more_shots(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        # SPACE, SPACE, S, Q - shots=5 so reaching 2 does not auto-save/end.
+        cv2 = self.make_cv2(frame, [ord(" "), ord(" "), ord("s"), ord("q")])
+        rawpy = self.make_rawpy()
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.arw_folder(directory)
+            with mock.patch.dict(sys.modules, {"cv2": cv2, "rawpy": rawpy}), \
+                    mock.patch.object(me, "blend_raw_files", return_value=True) as blend:
+                ok = me.live_ghost(directory, 5, "avg", output="early.tiff")
+        self.assertTrue(ok)
+        blend.assert_called_once_with([path, path], "early.tiff", mode="avg")
+
+    def test_s_key_without_output_prints_hint_and_does_not_save(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        cv2 = self.make_cv2(frame, [ord(" "), ord(" "), ord("s"), ord("q")])
+        rawpy = self.make_rawpy()
+        output_buf = io.StringIO()
+        with tempfile.TemporaryDirectory() as directory:
+            self.arw_folder(directory)
+            with mock.patch.dict(sys.modules, {"cv2": cv2, "rawpy": rawpy}), \
+                    mock.patch.object(me, "blend_raw_files") as blend, \
+                    contextlib.redirect_stdout(output_buf):
+                ok = me.live_ghost(directory, 5, "avg", output=None)
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        self.assertIn("no --output given", output_buf.getvalue())
+
+    def test_s_key_with_fewer_than_two_shots_prints_hint_and_does_not_save(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        # S pressed with 0 captured shots, then Q.
+        cv2 = self.make_cv2(frame, [ord("s"), ord("q")])
+        output_buf = io.StringIO()
+        with mock.patch.dict(sys.modules, {"cv2": cv2}), \
+                mock.patch.object(me, "blend_raw_files") as blend, \
+                contextlib.redirect_stdout(output_buf):
+            ok = me.live_ghost("0", 5, "avg", output="out.tiff")
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        self.assertIn("need >= 2 captured shots", output_buf.getvalue())
+
+    def test_reaching_shots_without_output_does_not_save_or_end(self):
+        frame = np.full((2, 2, 3), 64, dtype=np.uint8)
+        # SPACE, SPACE reaches shots=2 but there's no --output, so the session
+        # keeps running (unchanged pre-existing behavior) until Q.
+        cv2 = self.make_cv2(frame, [ord(" "), ord(" "), ord("q")])
+        with mock.patch.dict(sys.modules, {"cv2": cv2}), \
+                mock.patch.object(me, "blend_raw_files") as blend, \
+                mock.patch("cv2.imwrite") as imwrite:
+            ok = me.live_ghost("0", 2, "avg", output=None)
+        self.assertTrue(ok)
+        blend.assert_not_called()
+        imwrite.assert_not_called()
 
 
 if __name__ == "__main__":

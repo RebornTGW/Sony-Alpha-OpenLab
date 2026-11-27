@@ -828,8 +828,37 @@ def live_overlay(dev, shots, af, download_dir, out_path, opacity, blend,
     return state["saved"]
 
 
-def live_ghost(source, shots, mode):
-    """Show an OpenCV live feed blended with manually captured preview frames."""
+def _save_ghost_result(preview, captured_sources, output, mode):
+    """Save a --live-ghost result to `output`. If every captured source is a
+    RAW .ARW path and `output` ends in .tiff, run the 16-bit linear
+    blend_raw_files stack on the full-resolution RAW data instead of the
+    lower-res composited preview (built from JPEG thumbnails, or raw webcam/
+    video frames that have no RAW source at all); otherwise save the preview
+    image OpenCV already composited. Returns True on success."""
+    import cv2
+    arw_sources = [p for p in captured_sources
+                   if p and os.path.splitext(p)[1].lower() == ".arw"]
+    if (os.path.splitext(output)[1].lower() == ".tiff"
+            and captured_sources and len(arw_sources) == len(captured_sources)):
+        ok = blend_raw_files(captured_sources, output, mode=mode)
+        if ok:
+            print(f"[live-ghost] saved RAW {mode} stack of {len(arw_sources)} "
+                  f"frame(s) -> {output}")
+        return ok
+    ok = cv2.imwrite(output, preview)
+    if ok:
+        print(f"[live-ghost] saved composited preview -> {output}")
+    else:
+        print(f"[live-ghost] failed to write {output}")
+    return ok
+
+
+def live_ghost(source, shots, mode, output=None):
+    """Show an OpenCV live feed blended with manually captured preview frames.
+
+    Keys: SPACE capture (up to `shots`), R reset, S save early (needs `output`
+    and >= 2 captured shots), Q quit. Reaching `shots` captures auto-saves (if
+    `output` is set) and ends the session, same as a manual S + Q."""
     try:
         import cv2
     except ImportError:
@@ -838,14 +867,25 @@ def live_ghost(source, shots, mode):
 
     image_paths = None
     capture = None
+    rawpy_module = None
     source_path = os.fspath(source)
     if os.path.isdir(source_path):
-        supported = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
+        supported = {".arw", ".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
         image_paths = sorted(
             os.path.join(source_path, name)
             for name in os.listdir(source_path)
             if os.path.splitext(name)[1].lower() in supported
         )
+        if any(os.path.splitext(path)[1].lower() == ".arw" for path in image_paths):
+            try:
+                import rawpy as rawpy_module
+            except ImportError:
+                print("[live-ghost] rawpy is missing; skipping .ARW previews "
+                      "(install with: pip install rawpy).")
+                image_paths = [
+                    path for path in image_paths
+                    if os.path.splitext(path)[1].lower() != ".arw"
+                ]
         if not image_paths:
             print(f"[live-ghost] no supported images found in {source_path}")
             return False
@@ -863,12 +903,33 @@ def live_ghost(source, shots, mode):
             return False
 
     captured_frames = []
+    captured_sources = []  # parallel list: source path when from image_paths, else None
     image_index = 0
     try:
         while True:
             if image_paths is not None:
-                frame = cv2.imread(image_paths[image_index])
+                image_path = image_paths[image_index]
                 image_index = (image_index + 1) % len(image_paths)
+                if os.path.splitext(image_path)[1].lower() == ".arw":
+                    try:
+                        import numpy as np
+                    except ImportError:
+                        print("[live-ghost] numpy is required to decode .ARW previews.")
+                        return False
+                    try:
+                        with rawpy_module.imread(image_path) as raw:
+                            thumbnail = raw.extract_thumb()
+                    except rawpy_module.LibRawError as exc:
+                        print(f"[live-ghost] could not extract JPEG preview from "
+                              f"{image_path}: {exc}")
+                        return False
+                    if thumbnail.format != rawpy_module.ThumbFormat.JPEG:
+                        print(f"[live-ghost] {image_path} does not contain a JPEG preview")
+                        return False
+                    encoded = np.frombuffer(thumbnail.data, dtype=np.uint8)
+                    frame = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+                else:
+                    frame = cv2.imread(image_path)
             else:
                 ok, frame = capture.read()
                 if not ok and not source_path.isdecimal():
@@ -899,8 +960,27 @@ def live_ghost(source, shots, mode):
                 break
             if key in (ord("r"), ord("R")):
                 captured_frames.clear()
+                captured_sources.clear()
             elif key == ord(" ") and len(captured_frames) < shots:
                 captured_frames.append(frame.copy())
+                captured_sources.append(image_path if image_paths is not None else None)
+                if output and len(captured_frames) >= shots:
+                    resized = [
+                        cv2.resize(saved, (frame.shape[1], frame.shape[0]))
+                        if saved.shape != frame.shape else saved
+                        for saved in captured_frames
+                    ]
+                    final_preview = compose_ghost_preview(frame, resized, mode)
+                    _save_ghost_result(final_preview, captured_sources, output, mode)
+                    break
+            elif key in (ord("s"), ord("S")):
+                if not output:
+                    print("[live-ghost] no --output given; nothing to save.")
+                elif len(captured_frames) < 2:
+                    print(f"[live-ghost] need >= 2 captured shots to save early "
+                          f"(have {len(captured_frames)}).")
+                else:
+                    _save_ghost_result(preview, captured_sources, output, mode)
     finally:
         if capture is not None:
             capture.release()
@@ -954,8 +1034,12 @@ def main():
     ap.add_argument("--mode", choices=RAW_BLEND_MODES, default=None,
                     help="Blend mode for --raw-blend or --live-ghost: "
                          "dark, bright, avg, or add (default: avg).")
-    ap.add_argument("-o", "--output", metavar="OUT.tiff",
-                    help="Output 16-bit TIFF for --raw-blend.")
+    ap.add_argument("-o", "--output", metavar="OUT",
+                    help="Output path. Required .tiff for --raw-blend. Optional for "
+                         "--live-ghost: saved once --shots is reached, or early with "
+                         "[S] (needs >= 2 captured shots) - a RAW .tiff stack via "
+                         "blend_raw_files if every captured shot was an .ARW file and "
+                         "OUT ends in .tiff, else the composited preview image.")
     ap.add_argument("--live-ghost", action="store_true",
                     help="Open a live/manual ghost preview (webcam, video, or image folder).")
     ap.add_argument("--source", default=None, metavar="INDEX|PATH",
@@ -1004,13 +1088,12 @@ def main():
         ok = blend_raw_files(args.raw_blend, args.output, mode=args.mode or "avg")
         sys.exit(0 if ok else 1)
     if args.live_ghost:
-        if args.output is not None:
-            ap.error("--output can only be used with --raw-blend")
         if not 2 <= args.shots <= RAW_BLEND_MAX_FRAMES:
             ap.error(f"--live-ghost requires --shots {RAW_BLEND_MIN_FRAMES}.."
                      f"{RAW_BLEND_MAX_FRAMES}")
         source = args.source if args.source is not None else "0"
-        sys.exit(0 if live_ghost(source, args.shots, args.mode or "avg") else 1)
+        ok = live_ghost(source, args.shots, args.mode or "avg", output=args.output)
+        sys.exit(0 if ok else 1)
     if args.mode is not None or args.output is not None:
         ap.error("--mode and --output can only be used with --raw-blend or --live-ghost")
     if args.source is not None:

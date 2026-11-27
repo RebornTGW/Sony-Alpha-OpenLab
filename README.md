@@ -472,8 +472,14 @@ python multi_exposure.py --confirm-session-write --live-overlay --shots 2 \
 
 # Manual live ghost preview: webcam index, video file, or folder of images
 python multi_exposure.py --live-ghost --source 0 --shots 3 --mode avg
-# Offline preview from a video or image folder; Space freezes, R resets, Q quits
+# Offline preview from a video or image folder (.ARW shows its embedded JPEG
+# preview); Space freezes, S saves early (>= 2 shots), R resets, Q quits
 python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
+
+# --live-ghost + -o: a folder of .ARW + a .tiff output runs the full-resolution
+# 16-bit linear RAW stack (blend_raw_files) once --shots is reached or on S;
+# any other source/output combination saves the composited preview instead
+python multi_exposure.py --live-ghost --source ./raw_frames --shots 3 --mode add -o out/ghost.tiff
 ```
 
 | Option | Purpose |
@@ -487,7 +493,8 @@ python multi_exposure.py --live-ghost --source ./frames --shots 3 --mode bright
 | `--stack-all` | render all 4 core Fujifilm modes from the same frames at once |
 | `--interactive` / `--manual-step` | step-by-step: `[Enter]` next / `[r]` retake last / `[q]` finish & stack |
 | `--live-overlay` / `--overlay-opacity` | live window blending the feed (`0xFFFFC002`) over frame 1; Space captures |
-| `--live-ghost` / `--source` | OpenCV preview from webcam index (e.g. `0`), video, or image folder; `--shots` 2..9; Space captures, `R` resets, `Q` quits |
+| `--live-ghost` / `--source` | OpenCV preview from webcam index (e.g. `0`), video, or image folder (`.ARW` shown via its embedded JPEG preview); `--shots` 2..9; Space captures, `S` saves early, `R` resets, `Q` quits |
+| `-o` / `--output` | with `--raw-blend`: required `.tiff` output. With `--live-ghost`: optional - saved on reaching `--shots` or `S`; a RAW `.tiff` stack if every captured shot was an `.ARW`, else the composited preview |
 
 **Native double-exposure experience.** `--interactive` reproduces the Fujifilm
 in-camera flow: shoot frame 1, then for each next frame choose `[Enter]` to shoot,
@@ -499,9 +506,22 @@ no extra dependency.
 
 `--live-ghost` is a separate manual preview using a webcam/UVC device or an offline
 video/image folder. It shows the current frame blended with captured frames and a
-`Manual k/N exp. [mode]` HUD. Install its optional dependency with
-`pip install opencv-python`; press **Space** to freeze a shot, **R** to reset, or **Q**
-to quit. Available modes are `dark`, `bright`, `avg`, and `add`.
+`Manual k/N exp. [mode]` HUD. An image folder of Sony `.ARW` files works too: each one's
+embedded JPEG preview (`rawpy`'s `extract_thumb()`) is decoded for the live window — a
+file with no JPEG thumb, or `rawpy` not installed, is skipped with a clear message
+rather than failing the whole session. Install the optional dependencies with
+`pip install opencv-python rawpy`; press **Space** to freeze a shot, **S** to save
+early (needs `-o` and >= 2 captured shots), **R** to reset, or **Q** to quit. Available
+modes are `dark`, `bright`, `avg`, and `add`.
+
+**Saving a `--live-ghost` result (`-o`).** Reaching `--shots` auto-saves (then ends the
+session, same as `S` immediately followed by `Q`); `S` saves early once at least 2
+shots are captured, without ending the session. What gets written depends on the
+captured sources: if every one of them was an `.ARW` file (the folder-of-RAWs case)
+*and* `-o` ends in `.tiff`, the save runs the same full-resolution 16-bit linear
+`blend_raw_files` stack `--raw-blend` uses - not the lower-res JPEG-thumbnail preview.
+Any other case (webcam/video frames, a mix, or a non-`.tiff` output) saves the
+composited preview image OpenCV already has on screen.
 
 **Auto-download (PC Remote).** In PC Remote mode the A6700 doesn't expose
 `GetObjectHandles`; it places the last captured image on the special Sony handle
