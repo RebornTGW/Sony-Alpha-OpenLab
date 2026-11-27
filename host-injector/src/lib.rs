@@ -12,6 +12,8 @@ pub mod descriptor;
 pub mod inject;
 pub mod pmca;
 pub mod profile;
+pub mod ramdump;
+pub mod scan;
 pub mod scsi;
 pub mod transport;
 pub mod usb;

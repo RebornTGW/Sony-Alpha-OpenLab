@@ -28,7 +28,13 @@ OPTIONS:\n\
   --profiles-dir DIR      where to find the JSON profiles (default: ../profiles)\n\
   --allow-unverified-usb  send real (unverified) vendor frames; asks to confirm\n\
   --senser-config PATH    Senser key tables, JSON {{\"sha1\":[...],\"sha256\":[...]}}\n\
-                          (3 hex strings each); also read from OG_SENSER_CONFIG\n"
+                          (3 hex strings each); also read from OG_SENSER_CONFIG\n\
+  --dump-ram ADDR LEN --out PATH   opt-in: dump LEN bytes from ADDR to PATH\n\
+                          (hex, e.g. 0x02580cd8 0x40; same gates as --verify-only)\n\
+  --scan-dump BIN --ref-profile JSON [--out PATH]\n\
+                          offline, no camera: search BIN for JSON's stock-byte\n\
+                          signatures (default steps: L13, L16, S16), print (and\n\
+                          optionally save) a draft experimental profile\n"
     );
 }
 
@@ -44,6 +50,10 @@ fn main() -> ExitCode {
     let mut dial: Option<Dial> = None;
     let mut allow_unverified = false;
     let mut senser_config: Option<PathBuf> = None;
+    let mut dump_ram: Option<(u64, usize)> = None;
+    let mut out_path: Option<PathBuf> = None;
+    let mut scan_dump_path: Option<PathBuf> = None;
+    let mut ref_profile_path: Option<PathBuf> = None;
 
     let mut it = args.iter();
     while let Some(a) = it.next() {
@@ -62,6 +72,44 @@ fn main() -> ExitCode {
                     Some(p) => Some(PathBuf::from(p)),
                     None => {
                         eprintln!("--senser-config needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--dump-ram" => {
+                let addr = it.next().map(|s| opengate_rs::parse_u64(s));
+                let len = it.next().map(|s| opengate_rs::parse_u64(s));
+                match (addr, len) {
+                    (Some(Ok(a)), Some(Ok(l))) => dump_ram = Some((a, l as usize)),
+                    _ => {
+                        eprintln!("--dump-ram needs HEX_ADDR HEX_LEN (e.g. 0x4010 0x40)");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--out" => {
+                out_path = match it.next() {
+                    Some(p) => Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--out needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--scan-dump" => {
+                scan_dump_path = match it.next() {
+                    Some(p) => Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--scan-dump needs a path");
+                        return ExitCode::FAILURE;
+                    }
+                }
+            }
+            "--ref-profile" => {
+                ref_profile_path = match it.next() {
+                    Some(p) => Some(PathBuf::from(p)),
+                    None => {
+                        eprintln!("--ref-profile needs a path");
                         return ExitCode::FAILURE;
                     }
                 }
@@ -110,6 +158,22 @@ fn main() -> ExitCode {
         };
     }
 
+    // Offline mode: no camera, no profile positional arg - just two local files.
+    if let Some(dump_path) = &scan_dump_path {
+        let ref_path = match &ref_profile_path {
+            Some(p) => p,
+            None => {
+                eprintln!("--scan-dump needs --ref-profile <JSON_PATH>");
+                return ExitCode::FAILURE;
+            }
+        };
+        return run_scan_dump(dump_path, ref_path, out_path.as_deref());
+    }
+    if ref_profile_path.is_some() {
+        eprintln!("--ref-profile needs --scan-dump <BIN_PATH>");
+        return ExitCode::FAILURE;
+    }
+
     let prof = match Profile::load(&profiles_dir, &profile_name) {
         Ok(p) => p,
         Err(e) => {
@@ -129,7 +193,7 @@ fn main() -> ExitCode {
     }
     println!();
 
-    if !verify_only && !confirm {
+    if !verify_only && !confirm && dump_ram.is_none() {
         print_plan(&prof);
         println!("\n(no camera touched. --verify-only reads the body; --confirm-ram-write applies.)");
         return ExitCode::SUCCESS;
@@ -214,6 +278,38 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
+    // Standalone read: dumps straight from the held service-mode session, chunked
+    // through ramdump::dump_ram (each chunk's RMEM frame built by
+    // pmca::mem_read_request under ServiceLink::read). Independent of --verify-only
+    // / --confirm-ram-write - returns here rather than falling into the apply path.
+    if let Some((addr, len)) = dump_ram {
+        let out_path = match &out_path {
+            Some(p) => p.clone(),
+            None => {
+                eprintln!("[ERROR] --dump-ram needs --out <PATH>");
+                return ExitCode::FAILURE;
+            }
+        };
+        let chunk = opengate_rs::pmca::vendor::SENSER_CHUNK;
+        println!("[dump ] reading {len:#x} bytes from {addr:#x} in {chunk:#x}-byte chunks...");
+        return match opengate_rs::ramdump::dump_ram(&mut link, addr, len, chunk) {
+            Ok(bytes) => match std::fs::write(&out_path, &bytes) {
+                Ok(()) => {
+                    println!("[+] wrote {} bytes to {}", bytes.len(), out_path.display());
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] write {}: {e}", out_path.display());
+                    ExitCode::FAILURE
+                }
+            },
+            Err(e) => {
+                eprintln!("[ERROR] dump-ram: {e}");
+                ExitCode::FAILURE
+            }
+        };
+    }
+
     // A write chain needs the on-camera helper loaded first.
     if confirm {
         match find_helper_so() {
@@ -296,6 +392,47 @@ fn find_helper_so() -> Option<PathBuf> {
         "target-helper/zig-out/lib/libogpatch.so",
     ];
     candidates.iter().map(PathBuf::from).find(|p| p.is_file())
+}
+
+/// Offline signature scan: search `dump_path` for `ref_path`'s geometry-step stock
+/// bytes, print the resulting draft profile (and save it too, if `out` is given).
+/// No camera, no profile positional arg - just these two local files.
+fn run_scan_dump(dump_path: &std::path::Path, ref_path: &std::path::Path, out: Option<&std::path::Path>) -> ExitCode {
+    // Profile::load takes a direct file path straight through when it exists, so
+    // the `dir` argument here is unused.
+    let ref_prof = match Profile::load(std::path::Path::new("."), &ref_path.display().to_string()) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("[ERROR] --ref-profile {}: {e}", ref_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let dump = match std::fs::read(dump_path) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("[ERROR] --scan-dump {}: {e}", dump_path.display());
+            return ExitCode::FAILURE;
+        }
+    };
+    let matches = match opengate_rs::scan::scan_steps(&ref_prof, &dump, opengate_rs::scan::DEFAULT_STEP_IDS) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[ERROR] scan: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let draft = opengate_rs::scan::draft_profile(&format!("{}_scan_draft", ref_prof.name), &matches);
+    let pretty = serde_json::to_string_pretty(&draft).expect("draft profile serializes");
+    println!("{pretty}");
+
+    if let Some(out_path) = out {
+        if let Err(e) = std::fs::write(out_path, &pretty) {
+            eprintln!("[ERROR] write {}: {e}", out_path.display());
+            return ExitCode::FAILURE;
+        }
+        eprintln!("[+] wrote draft profile to {}", out_path.display());
+    }
+    ExitCode::SUCCESS
 }
 
 fn list_profiles(dir: &std::path::Path) -> opengate_rs::Result<()> {
