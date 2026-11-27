@@ -4,3 +4,9 @@ libusb-package>=1.0.26.1
 # Image stacking in multi_exposure.py (--stack). Capture works without them.
 pillow>=10.0.0
 numpy>=1.26.0
+
+# 16-bit linear RAW multi-exposure blending in multi_exposure.py
+# (blend_raw_files / blend_raw16 / load_raw16_linear / save_tiff16). Optional:
+# the pure blend_raw16() math needs neither and is unit-tested without them.
+rawpy>=0.19.0
+tifffile>=2024.1.30

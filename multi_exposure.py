@@ -455,6 +455,127 @@ def stack_all_modes(paths, base_out):
     return outs
 
 
+# ---------------------------------------------------------------------------
+# 16-bit linear RAW multi-exposure blending (.ARW / rawpy), 2..9 frames.
+#
+# Separate from stack_images()/_blend() above on purpose: those decode RAW via
+# rawpy's default gamma-encoded postprocess() (right for a quick preview, not
+# for additive math), then blend in that gamma space. Physically correct
+# multi-exposure math - summing or averaging light - needs to happen in LINEAR
+# light, before any display gamma curve, or midtones come out wrong (gamma-space
+# averaging is not the same as averaging the light itself). This path decodes
+# with gamma=(1, 1) (no curve) + no_auto_bright, blends in that linear space,
+# and writes a 16-bit TIFF so no precision is lost to an 8-bit intermediate.
+# ---------------------------------------------------------------------------
+RAW_BLEND_MODES = ("dark", "bright", "avg", "add")
+RAW_BLEND_MIN_FRAMES = 2
+RAW_BLEND_MAX_FRAMES = 9
+
+
+def blend_raw16(frames, mode):
+    """Blend 2..9 same-shape uint16 arrays into one uint16 array, in linear light.
+
+    mode:
+      'dark'   - per-pixel minimum (silhouettes against a bright background)
+      'bright' - per-pixel maximum (light trails, star trails)
+      'avg'    - per-pixel mean, rounded (balanced exposure, noise averaging)
+      'add'    - per-pixel sum, clamped to 65535 (film-style additive exposure;
+                 the physically correct way to combine N frames shot at
+                 correspondingly lower exposure so the sum reconstructs one
+                 properly-exposed frame)
+
+    Pure numpy math, no file I/O - independently unit-testable on synthetic
+    arrays without rawpy or a real RAW file.
+    """
+    import numpy as np
+
+    n = len(frames)
+    if not (RAW_BLEND_MIN_FRAMES <= n <= RAW_BLEND_MAX_FRAMES):
+        raise ValueError(
+            f"blend_raw16: need {RAW_BLEND_MIN_FRAMES}..{RAW_BLEND_MAX_FRAMES} "
+            f"frames, got {n}"
+        )
+    if mode not in RAW_BLEND_MODES:
+        raise ValueError(f"blend_raw16: unknown mode {mode!r}, want one of {RAW_BLEND_MODES}")
+    shape0 = frames[0].shape
+    for f in frames:
+        if f.shape != shape0:
+            raise ValueError(f"blend_raw16: frame shape mismatch {f.shape} != {shape0}")
+
+    stack = np.stack(frames, axis=0).astype(np.float64)  # (N, H, W[, C]), linear
+    if mode == "dark":
+        out = stack.min(axis=0)
+    elif mode == "bright":
+        out = stack.max(axis=0)
+    elif mode == "avg":
+        out = stack.mean(axis=0)
+    else:  # "add"
+        out = stack.sum(axis=0)
+    return np.clip(np.rint(out), 0, 65535).astype(np.uint16)
+
+
+def load_raw16_linear(path):
+    """Decode one RAW file to a linear (no gamma curve, no auto-brightness)
+    16-bit RGB array via rawpy - safe to add/average/min/max pixel-wise across
+    frames. Raises RuntimeError if rawpy isn't installed."""
+    import numpy as np
+    try:
+        import rawpy
+    except ImportError as e:
+        raise RuntimeError("RAW multi-exposure needs rawpy (pip install rawpy).") from e
+    with rawpy.imread(path) as raw:
+        rgb16 = raw.postprocess(
+            output_bps=16,
+            no_auto_bright=True,
+            use_camera_wb=True,
+            gamma=(1, 1),  # linear output, no display tone curve
+        )
+    return np.asarray(rgb16, dtype=np.uint16)
+
+
+def save_tiff16(arr, out_path):
+    """Save a uint16 array as a 16-bit TIFF. Raises RuntimeError if tifffile
+    isn't installed."""
+    import numpy as np
+    try:
+        import tifffile
+    except ImportError as e:
+        raise RuntimeError("16-bit TIFF export needs tifffile (pip install tifffile).") from e
+    tifffile.imwrite(out_path, np.asarray(arr, dtype=np.uint16))
+
+
+def blend_raw_files(paths, out_path, mode="avg"):
+    """End to end: decode 2..9 RAW files to linear 16-bit, blend by `mode`
+    (dark/bright/avg/add), write a 16-bit TIFF. Returns True on success, False
+    (with a printed reason) otherwise - never raises for a missing optional
+    dependency or a bad argument."""
+    n = len(paths)
+    if not (RAW_BLEND_MIN_FRAMES <= n <= RAW_BLEND_MAX_FRAMES):
+        print(f"[raw-blend] need {RAW_BLEND_MIN_FRAMES}..{RAW_BLEND_MAX_FRAMES} "
+              f"RAW files, got {n}.")
+        return False
+    if mode not in RAW_BLEND_MODES:
+        print(f"[raw-blend] unknown mode {mode!r}, want one of {RAW_BLEND_MODES}.")
+        return False
+    try:
+        frames = [load_raw16_linear(p) for p in paths]
+    except RuntimeError as e:
+        print(f"[raw-blend] {e}")
+        return False
+    try:
+        out = blend_raw16(frames, mode)
+    except ValueError as e:
+        print(f"[raw-blend] {e}")
+        return False
+    try:
+        save_tiff16(out, out_path)
+    except RuntimeError as e:
+        print(f"[raw-blend] {e}")
+        return False
+    print(f"[raw-blend] {mode} of {len(frames)} RAW frame(s) -> {out_path}")
+    return True
+
+
 def _write_preview(paths, download_dir):
     """Write a quick average preview of the frames captured so far (for composition
     during interactive shooting). Best-effort; silent without Pillow/numpy."""
