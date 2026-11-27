@@ -1,0 +1,85 @@
+name: Discord progress update
+
+# Posts a lightweight progress card to the Sony Open Gate Lab Discord when
+# documentation/README changes land on main, or on demand via a manual run
+# with a custom summary. Does NOT create or touch any GitHub Release - see
+# discord-release.yml for that. Reuses the same repository secret:
+# DISCORD_ANNOUNCEMENTS_WEBHOOK (Settings -> Secrets and variables -> Actions).
+
+on:
+  workflow_dispatch:
+    inputs:
+      summary:
+        description: "Optional custom summary to post instead of the latest commit message"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "docs/**"
+      - "README.md"
+      - "README.fr.md"
+
+permissions:
+  contents: read
+
+jobs:
+  announce:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post progress card to Discord
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_ANNOUNCEMENTS_WEBHOOK }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          SHA_SHORT: ${{ github.event.head_commit.id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          COMMIT_URL: ${{ github.event.head_commit.url }}
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+          ACTOR: ${{ github.actor }}
+          MANUAL_SUMMARY: ${{ github.event.inputs.summary }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "DISCORD_ANNOUNCEMENTS_WEBHOOK secret is not set; skipping."
+            exit 0
+          fi
+
+          if [ -n "$MANUAL_SUMMARY" ]; then
+            DESC="$MANUAL_SUMMARY"
+            URL="$RUN_URL"
+            REF="manual run"
+          else
+            DESC=$(printf '%s' "$COMMIT_MSG" | head -c 3500)
+            URL="${COMMIT_URL:-$RUN_URL}"
+            REF="${SHA_SHORT:-$SHA}"
+          fi
+          [ -z "$DESC" ] && DESC="Documentation/README updated on main."
+
+          PAYLOAD=$(jq -n \
+            --arg title "📚 $REPO — progress update" \
+            --arg url "$URL" \
+            --arg desc "$DESC" \
+            --arg ref "$REF" \
+            --arg actor "$ACTOR" \
+            --arg trigger "$EVENT_NAME" \
+            '{
+              username: "Sony Alpha OpenLab",
+              embeds: [{
+                title: $title,
+                url: $url,
+                description: $desc,
+                color: 3447003,
+                fields: [
+                  { name: "Ref", value: $ref, inline: true },
+                  { name: "By", value: $actor, inline: true },
+                  { name: "Trigger", value: $trigger, inline: true }
+                ],
+                footer: { text: "Sony-Open-Gate-Lab" }
+              }]
+            }')
+
+          curl -sf -X POST \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" \
+            "$WEBHOOK"
