@@ -37,14 +37,22 @@ cargo run -- profile_4k_24p_stable --video-standard NTSC --dial MOVIE   # plan +
 The Sony USB vendor framing (MSC vendor CDB `0x7a`, `ExtCmdHeader`, Senser service
 mode + FileControl/MemoryDump, the service PIDs) is transcribed **clean-room** from
 the public MIT project [`ma1co/Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE),
-cited by file + symbol in the source. The updater-shell framing (feature `0x23`,
-tokens `TEST`/`SHEL`/`PUSH`/`PULL`/`RMEM`, the sequence transfer) and the Senser auth
-handshake shape are modelled. A few pieces stay **external** (MIT, in PMCA-RE but not
-copied here): the Senser key tables (`pmca/usb/constants.py` `senserKeysSha1`/
-`senserKeysSha256`), `crypto.sha1_faulty`, and the senser bulk backend
-(`pmca/platform/backend/senser.py`). There is **no `ShellExec` opcode** — a binary is
-run via the `SHEL` interactive relay. So the end-to-end path cannot complete from
-public MIT alone, and those steps refuse rather than guess.
+cited by file + symbol in the source. Ported and unit-tested: the updater-shell
+framing (feature `0x23`, tokens `TEST`/`SHEL`/`PUSH`/`PULL`/`RMEM`, the sequence
+transfer), the Senser auth handshake + `crypto::sha1_faulty` (stock SHA-1 with the
+length field using `(len & 0x1f)*8`, from `pmca/usb/crypto.py`), and the exec
+sequence — there is **no `ShellExec` opcode**, so a binary is run by `PUSH`-ing it and
+typing its path on the `SHEL` relay (`exec_helper_sequence`).
+
+Two things stay **external** and keep the end-to-end path from completing on public
+MIT alone:
+- The Senser **key tables** (`pmca/usb/constants.py` `senserKeysSha1`/`senserKeysSha256`,
+  3 blobs each, hundreds of bytes). Too large to hand-transcribe safely, so only their
+  cited 8-byte fingerprints are embedded; copy the real blobs from constants.py and
+  pass them to `set_senser_keys()`, which verifies the fingerprints.
+- The Senser **control-transfer transport** (vendor request + ep1 terminal of
+  `SonySenserAuthDevice`) — not implemented on this MSC-bulk host; the
+  hardware-integration step.
 
 Two gates protect the camera:
 - `VENDOR_PROTOCOL_VERIFIED` (compile-time) stays `false` until proven on a real A6700.

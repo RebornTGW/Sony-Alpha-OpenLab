@@ -115,15 +115,92 @@ pub mod vendor {
     pub const BLOB_PATH: &str = "/tmp/ogpatch.bin";
     pub const RESULT_PATH: &str = "/tmp/ogresult.bin";
 
-    // --- EXTERNAL (MIT, present in Sony-PMCA-RE, NOT embedded in this repo) -------
-    // * Senser key tables: `pmca/usb/constants.py` -> `senserKeysSha1` /
-    //   `senserKeysSha256`, each a list of 3 opaque byte blobs (hundreds of bytes;
-    //   SHA1 entries longer than SHA256). Reused by index 0..2 per auth round.
-    // * `crypto.sha1_faulty` (pmca/usb/crypto.py) - the SHA1-path hash function.
-    // * The senser bulk transport lives in `pmca/platform/backend/senser.py`.
-    // These are referenced, not copied; supply them locally to run auth for real.
-    // There is NO dedicated "ShellExec" opcode: a binary is run via the `SHEL`
-    // interactive shell relay (pmca/shell/interactive.py, 127.0.0.1:5005).
+    // --- Senser key tables (pmca/usb/constants.py) ------------------------------
+    // `senserKeysSha1` / `senserKeysSha256` are each a list of 3 byte blobs (hundreds
+    // of bytes; SHA1 entries longer than SHA256), reused by index 0..2 per auth round.
+    // The full blobs are EXTERNAL MIT data - too large to hand-transcribe safely, so
+    // they are NOT embedded. Supply them from a local copy of constants.py; the loaded
+    // bytes are checked against these first-8-byte fingerprints (read from the file).
+    pub const SENSER_KEY_SHA1_FP: [[u8; 8]; 3] = [
+        [0x7d, 0x02, 0x84, 0x1e, 0x0e, 0xed, 0xdb, 0x2f],
+        [0xd6, 0xfd, 0xf3, 0x74, 0x6c, 0xba, 0xa9, 0x47],
+        [0x58, 0xdc, 0x5d, 0xf6, 0xe5, 0xc3, 0xb0, 0x03],
+    ];
+    pub const SENSER_KEY_SHA256_FP: [[u8; 8]; 3] = [
+        [0xe6, 0x06, 0xab, 0xc6, 0x5e, 0x0d, 0x92, 0xc1],
+        [0x37, 0xc4, 0xb1, 0x1c, 0x7e, 0xa1, 0x0d, 0xa1],
+        [0x36, 0x84, 0x9b, 0x20, 0xb8, 0x7d, 0x30, 0x9c],
+    ];
+}
+
+/// SHA-1 + Sony's `sha1_faulty`, ported from ma1co/Sony-PMCA-RE `pmca/usb/crypto.py`
+/// (whose header cites github.com/ajalt/python-sha1). The only deviation from stock
+/// SHA-1 is the fault: the 64-bit length field encodes `(len(message) & 0x1f) * 8`
+/// bits instead of `len(message) * 8`; padding is still from the real length.
+pub mod crypto {
+    fn sha1_core(message: &[u8], encoded_len_bytes: u64) -> [u8; 20] {
+        let mut msg = message.to_vec();
+        let ml_bits = encoded_len_bytes.wrapping_mul(8);
+        msg.push(0x80);
+        while msg.len() % 64 != 56 {
+            msg.push(0);
+        }
+        msg.extend_from_slice(&ml_bits.to_be_bytes());
+
+        let mut h: [u32; 5] = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0];
+        for chunk in msg.chunks(64) {
+            let mut w = [0u32; 80];
+            for i in 0..16 {
+                w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+            }
+            for i in 16..80 {
+                w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+            }
+            let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
+            for (i, &wi) in w.iter().enumerate() {
+                let (f, k) = if i < 20 {
+                    ((b & c) | ((!b) & d), 0x5A82_7999u32)
+                } else if i < 40 {
+                    (b ^ c ^ d, 0x6ED9_EBA1)
+                } else if i < 60 {
+                    ((b & c) | (b & d) | (c & d), 0x8F1B_BCDC)
+                } else {
+                    (b ^ c ^ d, 0xCA62_C1D6)
+                };
+                let tmp = a
+                    .rotate_left(5)
+                    .wrapping_add(f)
+                    .wrapping_add(e)
+                    .wrapping_add(k)
+                    .wrapping_add(wi);
+                e = d;
+                d = c;
+                c = b.rotate_left(30);
+                b = a;
+                a = tmp;
+            }
+            h[0] = h[0].wrapping_add(a);
+            h[1] = h[1].wrapping_add(b);
+            h[2] = h[2].wrapping_add(c);
+            h[3] = h[3].wrapping_add(d);
+            h[4] = h[4].wrapping_add(e);
+        }
+        let mut out = [0u8; 20];
+        for i in 0..5 {
+            out[4 * i..4 * i + 4].copy_from_slice(&h[i].to_be_bytes());
+        }
+        out
+    }
+
+    /// Standard SHA-1.
+    pub fn sha1(message: &[u8]) -> [u8; 20] {
+        sha1_core(message, message.len() as u64)
+    }
+
+    /// Sony's faulty SHA-1: `sha1(message, len(message) & 0x1f)`.
+    pub fn sha1_faulty(message: &[u8]) -> [u8; 20] {
+        sha1_core(message, (message.len() as u64) & 0x1f)
+    }
 }
 
 // ----------------------- pure vendor frame builders ------------------------- //
@@ -227,6 +304,42 @@ pub fn seq_header(sequence: u32) -> [u8; 4] {
     sequence.to_le_bytes()
 }
 
+/// A shell command line typed over the `SHEL` raw relay (bytes + newline, latin1).
+/// PMCA-RE has NO exec opcode: a binary is run by typing its path on the SHEL pipe
+/// (pmca/shell/interactive.py writes `stdin.readline()` straight to the socket).
+pub fn helper_invocation(path: &str) -> Vec<u8> {
+    let mut v = path.as_bytes().to_vec();
+    v.push(b'\n');
+    v
+}
+
+/// Check a supplied Senser key blob against its cited first-8-byte fingerprint.
+pub fn key_fingerprint_ok(key: &[u8], fp: &[u8; 8]) -> bool {
+    key.len() >= 8 && &key[..8] == fp
+}
+
+/// SHA1-path auth response body (sony.py authenticate): `0x01 + sha1_faulty(input)`,
+/// where `input = round_data + key` when the live PID is 0x0336, else `round_data[:4]`.
+pub fn senser_response_sha1(round_data: &[u8], key: &[u8], pid: u16) -> Vec<u8> {
+    let input: Vec<u8> = if pid == vendor::PID_SENSER[1] {
+        let mut v = round_data.to_vec();
+        v.extend_from_slice(key);
+        v
+    } else {
+        round_data.iter().take(4).copied().collect()
+    };
+    let mut out = vec![0x01u8];
+    out.extend_from_slice(&crypto::sha1_faulty(&input));
+    out
+}
+
+/// The three Senser key blobs per hash (copied from pmca/usb/constants.py by the
+/// user; verified against the cited fingerprints before use).
+pub struct SenserKeys {
+    pub sha1: [Vec<u8>; 3],
+    pub sha256: [Vec<u8>; 3],
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LinkState {
     MassStorage,
@@ -239,17 +352,33 @@ pub struct ServiceLink<P: BulkPipe> {
     bot: MscBot<P>,
     pub state: LinkState,
     allow_unverified: bool,
+    keys: Option<SenserKeys>,
 }
 
 impl<P: BulkPipe> ServiceLink<P> {
     pub fn new(bot: MscBot<P>) -> Self {
-        Self { bot, state: LinkState::MassStorage, allow_unverified: false }
+        Self { bot, state: LinkState::MassStorage, allow_unverified: false, keys: None }
     }
 
     /// Let a tester send real vendor frames without recompiling (CLI
     /// `--allow-unverified-usb`). Off by default.
     pub fn set_allow_unverified(&mut self, allow: bool) {
         self.allow_unverified = allow;
+    }
+
+    /// Supply the Senser key tables (copied by the user from pmca/usb/constants.py).
+    /// Each blob is checked against its cited fingerprint before it is stored.
+    pub fn set_senser_keys(&mut self, keys: SenserKeys) -> Result<()> {
+        for i in 0..3 {
+            if !key_fingerprint_ok(&keys.sha1[i], &vendor::SENSER_KEY_SHA1_FP[i]) {
+                return Err(Error::Usb(format!("senserKeysSha1[{i}] fingerprint mismatch")));
+            }
+            if !key_fingerprint_ok(&keys.sha256[i], &vendor::SENSER_KEY_SHA256_FP[i]) {
+                return Err(Error::Usb(format!("senserKeysSha256[{i}] fingerprint mismatch")));
+            }
+        }
+        self.keys = Some(keys);
+        Ok(())
     }
 
     /// The two-stage gate: compile-time verified OR runtime opt-in.
@@ -282,14 +411,24 @@ impl<P: BulkPipe> ServiceLink<P> {
     /// round keys and the SHA1-path hash are external (see EXTERNAL in `vendor`).
     pub fn enter_service(&mut self) -> Result<()> {
         self.gate("enter_service")?;
-        // Round 1 challenge would be sent as this packet (cmd 1):
+        if self.keys.is_none() {
+            return Err(Error::Usb(
+                "enter_service: Senser key tables not loaded. Copy senserKeysSha1 / \
+                 senserKeysSha256 from pmca/usb/constants.py and pass them to \
+                 set_senser_keys() (checked against the cited fingerprints)."
+                    .into(),
+            ));
+        }
+        // Keys + hash (crypto::sha1_faulty) + response framing (senser_response_sha1)
+        // are ready; round 1 challenge = auth_packet(1). What is missing is the senser
+        // control-transfer transport (vendorRequestOut + the ep1 terminal of
+        // SonySenserAuthDevice), which this MSC-bulk host does not implement.
         let _challenge = auth_packet(vendor::AUTH_CMD_CHALLENGE, &[]);
         Err(Error::Usb(
-            "enter_service: handshake framing is ready (pmca/usb/sony.py \
-             SonySenserAuthDevice: AuthPacket, _sendAuthPacket, authenticate), but the \
-             round keys `senserKeysSha1`/`senserKeysSha256` (pmca/usb/constants.py) and \
-             `crypto.sha1_faulty` (pmca/usb/crypto.py) are external MIT data, not \
-             embedded here. Supply them locally to complete auth."
+            "enter_service: keys loaded and handshake/crypto ready, but the Senser \
+             control-transfer transport (vendorRequestOut + ep1 terminal, \
+             pmca/usb/sony.py SonySenserAuthDevice) is not implemented on this MSC-bulk \
+             host. That is the remaining hardware-integration step."
                 .into(),
         ))
     }
@@ -308,19 +447,30 @@ impl<P: BulkPipe> ServiceLink<P> {
         ))
     }
 
-    /// Step 3b: PUSH the OGP1 blob, then run the helper. NOTE: there is no exec
-    /// opcode - a binary runs via the `SHEL` interactive relay.
+    /// Step 3b: PUSH the OGP1 blob to /tmp, then run the helper by typing its path on
+    /// the `SHEL` interactive relay (there is no exec opcode in PMCA-RE). Returns the
+    /// ordered frames the sequence emits.
     pub fn apply_blob(&mut self, blob: &[u8]) -> Result<()> {
         self.gate("apply_blob")?;
-        let _push = shell_request(vendor::SHELL_PUSH, vendor::BLOB_PATH.as_bytes());
-        let _ = blob;
-        let _shel = shell_request(vendor::SHELL_SHEL, &[]);
+        let _frames = self.exec_helper_sequence(blob);
         Err(Error::Usb(
-            "apply_blob: no ShellExec opcode exists in PMCA-RE; a binary is run via the \
-             b'SHEL' interactive relay (pmca/shell/interactive.py). That needs a \
-             connected shell (enter_service first)."
+            "apply_blob: PUSH->SHEL exec sequence is built (PUSH the blob, open SHEL, \
+             type the helper path), but it needs a connected shell - blocked on \
+             enter_service."
                 .into(),
         ))
+    }
+
+    /// Build the ordered frames to push the OGP1 blob and invoke the helper over SHEL:
+    /// [PUSH blob req, blob bytes, SHEL req, invocation line]. No exec opcode is used -
+    /// the last frame is the plain command line typed on the relay.
+    pub fn exec_helper_sequence(&self, blob: &[u8]) -> Vec<Vec<u8>> {
+        vec![
+            shell_request(vendor::SHELL_PUSH, vendor::BLOB_PATH.as_bytes()),
+            blob.to_vec(),
+            shell_request(vendor::SHELL_SHEL, &[]),
+            helper_invocation(vendor::HELPER_PATH),
+        ]
     }
 
     /// Read a RAM region back (updater shell `RMEM`, UsbMemoryReadRequest). Framing is
@@ -459,5 +609,66 @@ mod tests {
         assert_eq!(u32::from_le_bytes([b[0], b[1], b[2], b[3]]), 0x4010_0000);
         assert_eq!(u32::from_le_bytes([b[4], b[5], b[6], b[7]]), 0x40);
         assert_eq!(seq_header(7), 7u32.to_le_bytes());
+    }
+
+    #[test]
+    fn sha1_known_vector_abc() {
+        // FIPS 180 example SHA-1("abc"). len 3 < 32 -> sha1_faulty equals standard.
+        let want: [u8; 20] = [
+            0xa9, 0x99, 0x3e, 0x36, 0x47, 0x06, 0x81, 0x6a, 0xba, 0x3e, 0x25, 0x71, 0x78, 0x50,
+            0xc2, 0x6c, 0x9c, 0xd0, 0xd8, 0x9d,
+        ];
+        assert_eq!(crypto::sha1(b"abc"), want);
+        assert_eq!(crypto::sha1_faulty(b"abc"), want);
+    }
+
+    #[test]
+    fn sha1_faulty_diverges_from_32_bytes() {
+        // len 32 -> (len & 0x1f) == 0 -> length field differs from standard SHA-1.
+        let msg = [0x41u8; 32];
+        assert_ne!(crypto::sha1_faulty(&msg), crypto::sha1(&msg));
+    }
+
+    #[test]
+    fn senser_response_uses_faulty_sha1() {
+        let data = [1u8, 2, 3, 4, 5];
+        let key = [9u8; 40];
+        let r = senser_response_sha1(&data, &key, 0x0336);
+        assert_eq!(r[0], 0x01);
+        assert_eq!(r.len(), 1 + 20);
+        let mut input = data.to_vec();
+        input.extend_from_slice(&key); // pid 0x0336 -> data + key
+        assert_eq!(&r[1..], &crypto::sha1_faulty(&input));
+        let r2 = senser_response_sha1(&data, &key, 0x02a9); // other pid -> data[:4]
+        assert_eq!(&r2[1..], &crypto::sha1_faulty(&data[..4]));
+    }
+
+    #[test]
+    fn key_fingerprint_checks() {
+        let good = [0x7d, 0x02, 0x84, 0x1e, 0x0e, 0xed, 0xdb, 0x2f, 0x00, 0x11];
+        assert!(key_fingerprint_ok(&good, &vendor::SENSER_KEY_SHA1_FP[0]));
+        assert!(!key_fingerprint_ok(&[0u8; 8], &vendor::SENSER_KEY_SHA1_FP[0]));
+        assert!(!key_fingerprint_ok(&[0x7d], &vendor::SENSER_KEY_SHA1_FP[0])); // too short
+    }
+
+    #[test]
+    fn exec_sequence_is_push_then_shel_then_line() {
+        struct Dead;
+        impl BulkPipe for Dead {
+            fn write(&mut self, d: &[u8]) -> Result<usize> {
+                Ok(d.len())
+            }
+            fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+                Err(Error::Usb("x".into()))
+            }
+        }
+        let link = ServiceLink::new(MscBot::new(Dead));
+        let f = link.exec_helper_sequence(b"BLOBDATA");
+        assert_eq!(f.len(), 4);
+        assert_eq!(&f[0][0..4], b"PUSH");
+        assert_eq!(&f[1][..], b"BLOBDATA");
+        assert_eq!(&f[2][0..4], b"SHEL");
+        assert!(f[3].ends_with(b"\n"));
+        assert!(f[3].starts_with(b"/tmp/libogpatch.so"));
     }
 }
