@@ -11,9 +11,12 @@
 //!   2. a runtime `allow_unverified` flag (CLI `--allow-unverified-usb`, with an
 //!      interactive confirm) lets a tester send real frames without recompiling.
 //! Even when ungated, steps whose data is EXTERNAL (the Senser key tables + the
-//! SHA1-path hash) refuse rather than guess. There is no `ShellExec` opcode in
-//! PMCA-RE: a binary runs via the `SHEL` interactive relay. No fabricated vendor
-//! bytes are ever put on the wire.
+//! SHA1-path hash) refuse rather than guess. There is no exec opcode in PMCA-RE:
+//! a binary is invoked by typing its path on an interactive terminal - the
+//! Senser-mode raw terminal here (`setTerminalEnable` + `writeTerminal`,
+//! `SonySenserCamera`), or the separate Updater-mode `SHEL` relay this file also
+//! models (`shell_request`/`exec_helper_sequence`) but no longer uses by default.
+//! No fabricated vendor bytes are ever put on the wire.
 
 use serde::Deserialize;
 
@@ -71,6 +74,15 @@ pub mod vendor {
     pub const FILE_READ: u16 = 2;
     pub const FILE_DELETE: u16 = 3;
     /// `MemoryDumpHeader` = base INT32, size INT32 (the RAM read path).
+    /// `SonySenserCamera` pFuncs used by `setTerminalEnable` (how a binary is run,
+    /// not FileControl/MemoryDump above): `CommandHeader` = category INT16,
+    /// command INT16 (4 B), shared by both.
+    pub const PFUNC_PRODUCT_INFO: u16 = 0x10;
+    pub const PFUNC_ADJUST_CONTROL: u16 = 0x40;
+    /// `SONY_PRODUCT_INFO_TERM_CHANGE` = (category, command).
+    pub const PRODUCT_INFO_TERM_CHANGE: (u16, u16) = (0, 0x00f1);
+    /// `SONY_ADJUST_SENSER_TERM_MODE` = (block, code).
+    pub const ADJUST_SENSER_TERM_MODE: (u16, u16) = (0x601, 0x1f);
 
     // --- Senser auth handshake (pmca/usb/sony.py, SonySenserAuthDevice) ----------
     /// `AuthPacket` (BIG_ENDIAN) = cmd INT16, salt INT16, data STR(0x200) -> 516 B.
@@ -239,24 +251,45 @@ fn senser_wrap(pfunc: u16, sequence: u16, body: &[u8]) -> Vec<u8> {
 }
 
 /// Senser FileControl frame: header + (cmd, filenameSize) + padded filename + data.
+/// `_sendFileControlPacket` (pmca/usb/sony.py) pads with
+/// `b'\0' * (4 - len(filename) % 4)` - always 1..=4 extra bytes, even when the
+/// filename is already a multiple of 4 (e.g. `/tmp/ogpatch.bin`, 16 chars, still
+/// gets a full extra 4-byte pad) - NOT the more usual "round up, 0 if already
+/// aligned" scheme.
 pub fn senser_file_frame(sub_cmd: u16, path: &str, data: &[u8], sequence: u16) -> Vec<u8> {
     let name = path.as_bytes();
-    let padded = (name.len() + 3) & !3;
+    let pad = 4 - (name.len() % 4);
+    let padded = name.len() + pad;
     let mut body = Vec::with_capacity(4 + padded + data.len());
     body.extend_from_slice(&sub_cmd.to_le_bytes());
     body.extend_from_slice(&(name.len() as u16).to_le_bytes());
     body.extend_from_slice(name);
-    body.resize(4 + padded, 0); // NUL-pad filename to a multiple of 4
+    body.resize(4 + padded, 0); // NUL-pad filename, always 1..=4 extra bytes
     body.extend_from_slice(data);
     senser_wrap(vendor::PFUNC_FILE_CONTROL, sequence, &body)
 }
 
-/// Senser MemoryDump frame: header + (base INT32, size INT32).
+/// Senser MemoryDump frame: header + (base INT32, size INT32). A *read* request
+/// (`SonySenserCamera.readMemory`): no payload follows - the requested read size
+/// lives in the `size` field here, not in the outer SenserPacketHeader, which
+/// `send_senser_frame` fills in from the frame's own length regardless.
 pub fn senser_memdump_frame(base: u32, size: u32, sequence: u16) -> Vec<u8> {
     let mut body = Vec::with_capacity(8);
     body.extend_from_slice(&base.to_le_bytes());
     body.extend_from_slice(&size.to_le_bytes());
     senser_wrap(vendor::PFUNC_MEMORY_DUMP, sequence, &body)
+}
+
+/// Senser ProductInfo / AdjustControl frame: header + CommandHeader
+/// (category/block INT16, command/code INT16) + data. Used by
+/// `setTerminalEnable` (how a binary is run), via `PFUNC_PRODUCT_INFO` /
+/// `PFUNC_ADJUST_CONTROL`.
+pub fn senser_command_frame(pfunc: u16, category: u16, command: u16, data: &[u8], sequence: u16) -> Vec<u8> {
+    let mut body = Vec::with_capacity(4 + data.len());
+    body.extend_from_slice(&category.to_le_bytes());
+    body.extend_from_slice(&command.to_le_bytes());
+    body.extend_from_slice(data);
+    senser_wrap(pfunc, sequence, &body)
 }
 
 /// Senser AuthPacket (BIG_ENDIAN): cmd INT16 (sent as `~cmd & 0xffff`), salt INT16
@@ -317,7 +350,9 @@ pub fn helper_invocation(path: &str) -> Vec<u8> {
 
 /// Decode a `UsbShellResponse` (result INT32; failure when bit `0x8000_0000` is
 /// set) - the reply to a request built by `shell_request()` (PUSH/SHEL/RMEM/
-/// TEST/PULL/EXIT).
+/// TEST/PULL/EXIT), the separate Updater-mode (0x033a/0x03e2) shell protocol.
+/// Not used by any Senser-mode (0x0336) call in this file - kept as a correct,
+/// tested building block for that other mode.
 pub fn shell_result_ok(reply: &[u8]) -> Result<()> {
     if reply.len() < 4 {
         return Err(Error::Usb("shell reply: short UsbShellResponse".into()));
@@ -329,21 +364,62 @@ pub fn shell_result_ok(reply: &[u8]) -> Result<()> {
     Ok(())
 }
 
-/// Decode a `SenserPacketHeader` reply's `response` byte (the last byte of the
-/// 12-byte header) - the reply to a request built by `senser_file_frame()` /
-/// `senser_memdump_frame()`. `0` is treated as success, matching this file's
-/// other zero-is-ok conventions (SCSI status, shell result); any other value's
-/// exact meaning per `pFunc` is not cited anywhere fetched, so it is surfaced
-/// as-is rather than interpreted.
-pub fn senser_reply_ok(reply: &[u8]) -> Result<()> {
-    if reply.len() < vendor::SENSER_HEADER_LEN {
-        return Err(Error::Usb("senser reply: short SenserPacketHeader".into()));
-    }
-    let response = reply[vendor::SENSER_HEADER_LEN - 1];
-    if response != 0 {
-        return Err(Error::Usb(format!("senser reply: response byte {response:#x}")));
+/// Check a `SenserPacketHeader` reply's `response` byte against the success
+/// code(s) its `pFunc` actually uses - these differ per op
+/// (`SonySenserCamera`, pmca/usb/sony.py): `_sendFileControlPacket` and
+/// `_sendProductInfoPacket` both require exactly `1`; `_sendAdjustControlPacket`
+/// requires exactly `0`; `_sendMemoryDumpPacket` accepts `0` OR `1`. There is no
+/// universal "0 is ok" here.
+pub fn senser_response_ok(pfunc: u16, response: u8) -> Result<()> {
+    let ok = match pfunc {
+        vendor::PFUNC_FILE_CONTROL | vendor::PFUNC_PRODUCT_INFO => response == 1,
+        vendor::PFUNC_ADJUST_CONTROL => response == 0,
+        vendor::PFUNC_MEMORY_DUMP => response == 0 || response == 1,
+        _ => response == 0,
+    };
+    if !ok {
+        return Err(Error::Usb(format!("senser reply: pFunc {pfunc:#06x} response {response:#x}")));
     }
     Ok(())
+}
+
+/// Send one SenserPacketHeader-wrapped frame (built by `senser_file_frame()` /
+/// `senser_memdump_frame()` / `senser_command_frame()`) and read back its reply:
+/// the header (`sequence`-checked against what the frame declared) plus however
+/// many bytes `header.size` says follow, chunked at `SENSER_CHUNK` -
+/// `SonySenserDevice.sendSenserPacket` (pmca/usb/sony.py). After any sub-chunk
+/// whose length is itself a multiple of `SENSER_MIN`, that function reads and
+/// discards an extra `SENSER_MIN` bytes (an alignment quirk); reproduced here
+/// faithfully even though none of this file's own calls are ever large enough to
+/// need more than one sub-chunk. Only the live-PID-0x0336 path is implemented
+/// (`sendSenserPacket`'s `minSize = 0`); the pre-re-enumeration PID's
+/// `minSize = SENSER_MIN` branch is not, since this file never talks to that PID.
+fn send_senser_frame(io: &mut dyn SenserIo, frame: &[u8], sequence: u16) -> Result<(u8, Vec<u8>)> {
+    io.bulk_out(frame)?;
+
+    let mut header = [0u8; vendor::SENSER_HEADER_LEN];
+    io.bulk_in(&mut header)?;
+    let reply_seq = u16::from_le_bytes([header[6], header[7]]);
+    if reply_seq != sequence {
+        return Err(Error::Usb(format!("senser reply: sequence {reply_seq} != sent {sequence}")));
+    }
+    let reply_size = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
+    let response = header[vendor::SENSER_HEADER_LEN - 1];
+
+    let mut data = Vec::with_capacity(reply_size);
+    let mut done = 0usize;
+    while done < reply_size {
+        let l = (reply_size - done).min(vendor::SENSER_CHUNK);
+        let mut chunk = vec![0u8; l];
+        io.bulk_in(&mut chunk)?;
+        data.extend_from_slice(&chunk);
+        done += l;
+        if l % vendor::SENSER_MIN == 0 {
+            let mut pad = vec![0u8; vendor::SENSER_MIN];
+            io.bulk_in(&mut pad)?; // alignment padding, discarded (not real data)
+        }
+    }
+    Ok((response, data))
 }
 
 /// Check a supplied Senser key blob against its cited first-8-byte fingerprint.
@@ -539,6 +615,7 @@ pub struct ServiceLink<P: BulkPipe> {
     allow_unverified: bool,
     keys: Option<SenserKeys>,
     senser_io: Option<Box<dyn SenserIo>>,
+    senser_sequence: u16,
 }
 
 impl<P: BulkPipe> ServiceLink<P> {
@@ -549,7 +626,17 @@ impl<P: BulkPipe> ServiceLink<P> {
             allow_unverified: false,
             keys: None,
             senser_io: None,
+            senser_sequence: 1,
         }
+    }
+
+    /// The next Senser packet sequence number. `SonySenserDevice` (pmca/usb/
+    /// sony.py) starts its own counter at 1 and increments it after every
+    /// exchange; the reply must echo whatever value the request sent.
+    fn next_senser_sequence(&mut self) -> u16 {
+        let seq = self.senser_sequence;
+        self.senser_sequence = self.senser_sequence.wrapping_add(1);
+        seq
     }
 
     /// Wire the Senser control+bulk transport `enter_service()` drives. Real
@@ -679,62 +766,97 @@ impl<P: BulkPipe> ServiceLink<P> {
         Ok(())
     }
 
-    /// Step 3a: push the compiled helper to `/tmp` over the Senser bulk channel's
-    /// own FileControl FILE_WRITE (`senser_file_frame`) - we're in Senser mode
-    /// (0x0336) after `enter_service()`, not Updater mode (0x033a/0x03e2), so this
-    /// uses the mode we're actually in rather than the separate Updater-shell `PUSH`
-    /// token. Whole payload in one frame; a real device's practical size limit for
-    /// that is unverified (no chunking is attempted here).
+    /// Step 3a: push the compiled helper to `/tmp` via the Senser protocol's own
+    /// FileControl FILE_WRITE (`SonySenserCamera.writeFile`, pmca/usb/sony.py) -
+    /// we're in Senser mode (0x0336) after `enter_service()`, so this uses that
+    /// mode's own op rather than the separate Updater-mode (0x033a/0x03e2) shell
+    /// `PUSH` token. Whole payload in one SenserPacketHeader frame;
+    /// `sendSenserPacket`'s own >1 MiB multi-packet path (`SenserMaxSize`) is not
+    /// implemented - not needed for a compiled helper.
     pub fn upload_helper(&mut self, so_bytes: &[u8]) -> Result<()> {
         self.gate("upload_helper")?;
+        let seq = self.next_senser_sequence();
         let io = self.senser_io.as_deref_mut().ok_or_else(|| {
             Error::Usb("upload_helper: no SenserIo wired. Call set_senser_io() first.".into())
         })?;
-        let frame = senser_file_frame(vendor::FILE_WRITE, vendor::HELPER_PATH, so_bytes, 1);
-        io.bulk_out(&frame)?;
-        let mut reply = [0u8; vendor::SENSER_HEADER_LEN];
-        io.bulk_in(&mut reply)?;
-        senser_reply_ok(&reply)
+        let frame = senser_file_frame(vendor::FILE_WRITE, vendor::HELPER_PATH, so_bytes, seq);
+        let (response, _data) = send_senser_frame(io, &frame, seq)?;
+        senser_response_ok(vendor::PFUNC_FILE_CONTROL, response)
     }
 
-    /// Step 3b: PUSH the OGP1 blob to /tmp, then run the helper by typing its path on
-    /// the `SHEL` interactive relay (there is no exec opcode in PMCA-RE) - the 4
-    /// frames `exec_helper_sequence()` builds, sent in order over the wired
-    /// `SenserIo`. Those frames are shaped for the separate Updater-shell protocol
-    /// (PUSH/SHEL tokens), sent here over the Senser bulk channel per the wiring
-    /// this method is asked to do; whether live firmware actually accepts
-    /// Updater-shell-framed packets while still in Senser mode, versus needing a
-    /// separate re-enumeration into Updater mode first, is unverified - same bucket
-    /// as everything else `VENDOR_PROTOCOL_VERIFIED` gates. A `UsbShellResponse`
-    /// follows each of the first three frames (the PUSH request, the blob-bytes
-    /// data phase, and the SHEL request); the last frame is the plain command line
-    /// typed on the relay, which has no response framing of its own
-    /// (`pmca/shell/interactive.py` just forwards `stdin.readline()`) - whatever
-    /// comes back is read but not validated.
+    /// Step 3b: push the OGP1 blob to /tmp via FileControl, then run the helper
+    /// the way `SenserPlatformBackend.interactiveShell` actually does
+    /// (pmca/platform/backend/senser.py): `setTerminalEnable(True)`, type the
+    /// helper's path on the raw terminal byte stream (there is no exec opcode in
+    /// PMCA-RE), `setTerminalEnable(False)`. Fire-and-forget: the real
+    /// `interactiveShell` relays the terminal bidirectionally over a live socket
+    /// connection, which this single-session, non-interactive call doesn't have -
+    /// there is no protocol-correct way here to read the command's output or know
+    /// when it finished.
     pub fn apply_blob(&mut self, blob: &[u8]) -> Result<()> {
         self.gate("apply_blob")?;
-        let frames = self.exec_helper_sequence(blob);
-        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
-            Error::Usb("apply_blob: no SenserIo wired. Call set_senser_io() first.".into())
-        })?;
-        let last = frames.len() - 1;
-        for (i, frame) in frames.iter().enumerate() {
-            io.bulk_out(frame)?;
-            if i < last {
-                let mut reply = [0u8; 4];
-                io.bulk_in(&mut reply)?;
-                shell_result_ok(&reply)?;
-            } else {
-                let mut reply = vec![0u8; vendor::SHELL_DATA_MAX];
-                let _ = io.bulk_in(&mut reply); // best-effort; no framing to validate
-            }
+
+        let seq = self.next_senser_sequence();
+        {
+            let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+                Error::Usb("apply_blob: no SenserIo wired. Call set_senser_io() first.".into())
+            })?;
+            let frame = senser_file_frame(vendor::FILE_WRITE, vendor::BLOB_PATH, blob, seq);
+            let (response, _data) = send_senser_frame(io, &frame, seq)?;
+            senser_response_ok(vendor::PFUNC_FILE_CONTROL, response)?;
+        }
+
+        self.set_terminal_enable(true)?;
+        self.write_terminal(&helper_invocation(vendor::HELPER_PATH))?;
+        self.set_terminal_enable(false)?;
+        Ok(())
+    }
+
+    /// `SonySenserCamera.setTerminalEnable` (pmca/usb/sony.py): a ProductInfo
+    /// term-change that must succeed, then an AdjustControl senser-term-mode call
+    /// the real code wraps in a bare `try/except: pass` - best-effort here too,
+    /// its outcome (success, a bad response, or a transport error) is ignored
+    /// either way.
+    fn set_terminal_enable(&mut self, enable: bool) -> Result<()> {
+        let seq = self.next_senser_sequence();
+        {
+            let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+                Error::Usb("set_terminal_enable: no SenserIo wired. Call set_senser_io() first.".into())
+            })?;
+            let (category, command) = vendor::PRODUCT_INFO_TERM_CHANGE;
+            let frame = senser_command_frame(vendor::PFUNC_PRODUCT_INFO, category, command, &[enable as u8], seq);
+            let (response, _data) = send_senser_frame(io, &frame, seq)?;
+            senser_response_ok(vendor::PFUNC_PRODUCT_INFO, response)?;
+        }
+
+        let seq2 = self.next_senser_sequence();
+        if let Some(io) = self.senser_io.as_deref_mut() {
+            let (block, code) = vendor::ADJUST_SENSER_TERM_MODE;
+            let data = [if enable { 2 } else { 0 }];
+            let frame2 = senser_command_frame(vendor::PFUNC_ADJUST_CONTROL, block, code, &data, seq2);
+            let _ = send_senser_frame(io, &frame2, seq2); // best-effort, errors ignored
         }
         Ok(())
     }
 
-    /// Build the ordered frames to push the OGP1 blob and invoke the helper over SHEL:
-    /// [PUSH blob req, blob bytes, SHEL req, invocation line]. No exec opcode is used -
-    /// the last frame is the plain command line typed on the relay.
+    /// `SonySenserDevice.writeTerminal` (pmca/usb/sony.py): raw bulk-OUT in
+    /// `<=0x40`-byte chunks, no `SenserPacketHeader` - once
+    /// `setTerminalEnable(true)` has run, the terminal is a plain byte stream.
+    fn write_terminal(&mut self, data: &[u8]) -> Result<()> {
+        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+            Error::Usb("write_terminal: no SenserIo wired. Call set_senser_io() first.".into())
+        })?;
+        for chunk in data.chunks(0x40) {
+            io.bulk_out(chunk)?;
+        }
+        Ok(())
+    }
+
+    /// Build the ordered frames to push the OGP1 blob and invoke the helper over the
+    /// separate Updater-mode `SHEL` relay: [PUSH blob req, blob bytes, SHEL req,
+    /// invocation line]. No longer used by `apply_blob()` (which now matches
+    /// senser.py's own terminal mechanism instead) - kept as a correct, tested
+    /// building block for that other mode.
     pub fn exec_helper_sequence(&self, blob: &[u8]) -> Vec<Vec<u8>> {
         vec![
             shell_request(vendor::SHELL_PUSH, vendor::BLOB_PATH.as_bytes()),
@@ -744,34 +866,25 @@ impl<P: BulkPipe> ServiceLink<P> {
         ]
     }
 
-    /// Read a RAM region back (updater shell `RMEM`, `UsbMemoryReadRequest` via
-    /// `mem_read_request`), sent over the wired `SenserIo`. One transfer, capped at
-    /// `SHELL_DATA_MAX`; callers needing more chunk across multiple calls (see
-    /// `ramdump::dump_ram`). The reply is treated as one plain `UsbDataMsg` (size
-    /// INT32 + data) - whether a real device instead streams a
-    /// `UsbSequenceTransferHeader` + multiple `UsbDataMsg`s + a `UsbStatusMsg` is
-    /// not cited anywhere fetched and is not attempted here.
+    /// Read a RAM region back via the Senser protocol's own MemoryDump
+    /// (`SonySenserCamera.readMemory`, pmca/usb/sony.py): `senser_memdump_frame`
+    /// sent over the wired `SenserIo`, response checked against MemoryDump's own
+    /// `{0, 1}` success codes (not FileControl's single code `1`). No chunking
+    /// across multiple reads here; callers needing more than one `MemoryDump`
+    /// reply's worth chunk across multiple calls (see `ramdump::dump_ram`).
     fn read_ram(&mut self, addr: u64, len: usize) -> Result<Vec<u8>> {
         self.gate("read_ram")?;
-        if len > vendor::SHELL_DATA_MAX {
-            return Err(Error::Usb(format!(
-                "read_ram: len {len:#x} exceeds one RMEM transfer ({:#x}); callers must chunk.",
-                vendor::SHELL_DATA_MAX
-            )));
-        }
+        let seq = self.next_senser_sequence();
         let io = self.senser_io.as_deref_mut().ok_or_else(|| {
             Error::Usb("read_ram: no SenserIo wired. Call set_senser_io() first.".into())
         })?;
-        let req = shell_request(vendor::SHELL_RMEM, &mem_read_request(addr as u32, len as u32));
-        io.bulk_out(&req)?;
-        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
-        io.bulk_in(&mut reply)?;
-        let got = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize;
-        let avail = got.min(vendor::SHELL_DATA_MAX);
-        if avail < len {
-            return Err(Error::Usb(format!("read_ram: short RMEM reply ({avail:#x}/{len:#x} bytes)")));
+        let frame = senser_memdump_frame(addr as u32, len as u32, seq);
+        let (response, data) = send_senser_frame(io, &frame, seq)?;
+        senser_response_ok(vendor::PFUNC_MEMORY_DUMP, response)?;
+        if data.len() < len {
+            return Err(Error::Usb(format!("read_ram: short MemoryDump reply ({:#x}/{len:#x} bytes)", data.len())));
         }
-        Ok(reply[4..4 + len].to_vec())
+        Ok(data[..len].to_vec())
     }
 }
 
@@ -852,6 +965,31 @@ mod tests {
         assert_eq!(&b[4..10], b"/tmp/x");
         // "/tmp/x" is 6 bytes -> padded to 8; data follows at body offset 4+8
         assert_eq!(&b[4 + 8..], &data);
+    }
+
+    #[test]
+    fn senser_file_frame_pads_filename_even_when_already_aligned() {
+        // "/tmp/ogpatch.bin" is 16 chars - already a multiple of 4 - but
+        // senser.py's `4 - len(filename) % 4` still adds a full extra 4-byte
+        // pad (never 0), so the name field occupies 20 bytes, not 16.
+        let f = senser_file_frame(vendor::FILE_WRITE, vendor::BLOB_PATH, &[], 1);
+        let b = &f[vendor::SENSER_HEADER_LEN..];
+        assert_eq!(u16::from_le_bytes([b[2], b[3]]), 16); // filenameSize = unpadded length
+        assert_eq!(&b[4..20], vendor::BLOB_PATH.as_bytes());
+        assert_eq!(&b[20..24], &[0u8; 4]); // the extra pad
+        assert_eq!(b.len(), 24); // no data -> body ends right after the pad
+    }
+
+    #[test]
+    fn senser_response_ok_matches_per_pfunc_codes() {
+        assert!(senser_response_ok(vendor::PFUNC_FILE_CONTROL, 1).is_ok());
+        assert!(senser_response_ok(vendor::PFUNC_FILE_CONTROL, 0).is_err());
+        assert!(senser_response_ok(vendor::PFUNC_PRODUCT_INFO, 1).is_ok());
+        assert!(senser_response_ok(vendor::PFUNC_ADJUST_CONTROL, 0).is_ok());
+        assert!(senser_response_ok(vendor::PFUNC_ADJUST_CONTROL, 1).is_err());
+        assert!(senser_response_ok(vendor::PFUNC_MEMORY_DUMP, 0).is_ok());
+        assert!(senser_response_ok(vendor::PFUNC_MEMORY_DUMP, 1).is_ok());
+        assert!(senser_response_ok(vendor::PFUNC_MEMORY_DUMP, 2).is_err());
     }
 
     #[test]
@@ -1199,68 +1337,120 @@ mod tests {
         link
     }
 
-    #[test]
-    fn read_ram_returns_bytes_from_rmem_reply() {
-        let data = [0xAAu8, 0xBB, 0xCC, 0xDD];
-        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
-        reply[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
-        reply[4..4 + data.len()].copy_from_slice(&data);
-        let mut link = gated_link(MockSenserIo::new(vec![reply]));
+    /// Build the queued `bulk_in` replies for one `send_senser_frame` round-trip:
+    /// a SenserPacketHeader (`size = data.len()`, given sequence/response),
+    /// followed by `data` itself, plus - matching the real alignment quirk - an
+    /// extra discarded `SENSER_MIN`-byte pad if `data.len()` is itself a nonzero
+    /// multiple of `SENSER_MIN`.
+    fn senser_reply_frames(sequence: u16, response: u8, data: &[u8]) -> Vec<Vec<u8>> {
+        let mut header = vec![0u8; vendor::SENSER_HEADER_LEN];
+        header[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        header[6..8].copy_from_slice(&sequence.to_le_bytes());
+        header[vendor::SENSER_HEADER_LEN - 1] = response;
+        let mut frames = vec![header];
+        if !data.is_empty() {
+            frames.push(data.to_vec());
+            if data.len() % vendor::SENSER_MIN == 0 {
+                frames.push(vec![0u8; vendor::SENSER_MIN]);
+            }
+        }
+        frames
+    }
 
+    #[test]
+    fn read_ram_returns_bytes_from_memdump_reply() {
+        let data = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 0, &data)));
         let got = link.read(0x4010_0000, data.len()).unwrap();
         assert_eq!(got, data);
     }
 
     #[test]
-    fn read_ram_errors_on_short_rmem_reply() {
-        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
-        reply[0..4].copy_from_slice(&2u32.to_le_bytes()); // claims 2 bytes, caller wants 4
-        let mut link = gated_link(MockSenserIo::new(vec![reply]));
-
-        let err = link.read(0x4010_0000, 4).unwrap_err();
-        assert!(matches!(err, Error::Usb(ref s) if s.contains("short RMEM reply")));
+    fn read_ram_accepts_memdump_response_one_too() {
+        let data = [0x11u8, 0x22];
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 1, &data)));
+        link.read(0x1000, data.len()).unwrap();
     }
 
     #[test]
-    fn read_ram_refuses_len_over_one_transfer() {
-        let mut link = gated_link(MockSenserIo::new(vec![]));
-        let err = link.read(0x4010_0000, vendor::SHELL_DATA_MAX + 1).unwrap_err();
-        assert!(matches!(err, Error::Usb(ref s) if s.contains("exceeds one RMEM transfer")));
+    fn read_ram_errors_on_bad_memdump_response() {
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 2, &[0u8; 4])));
+        let err = link.read(0x1000, 4).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("pFunc")));
     }
 
     #[test]
-    fn upload_helper_sends_file_write_and_checks_response_byte() {
-        let reply = [0u8; vendor::SENSER_HEADER_LEN]; // response byte (last) = 0 -> ok
-        let mut link = gated_link(MockSenserIo::new(vec![reply.to_vec()]));
+    fn read_ram_errors_on_short_memdump_reply() {
+        let data = [0xAAu8, 0xBB]; // caller wants 4, reply only carries 2
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 0, &data)));
+        let err = link.read(0x1000, 4).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("short MemoryDump reply")));
+    }
+
+    #[test]
+    fn read_ram_discards_alignment_padding_after_a_512_byte_chunk() {
+        let data = vec![0x7u8; vendor::SENSER_MIN]; // exactly 512 bytes -> triggers the pad
+        let frames = senser_reply_frames(1, 0, &data);
+        assert_eq!(frames.len(), 3); // header, data, discarded pad
+        let mut link = gated_link(MockSenserIo::new(frames));
+        let got = link.read(0x1000, data.len()).unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn read_ram_errors_on_sequence_mismatch() {
+        let mut header = vec![0u8; vendor::SENSER_HEADER_LEN];
+        header[6..8].copy_from_slice(&99u16.to_le_bytes()); // wrong - fresh link expects 1
+        let mut link = gated_link(MockSenserIo::new(vec![header]));
+        let err = link.read(0x1000, 0).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("sequence")));
+    }
+
+    #[test]
+    fn upload_helper_sends_file_write_and_checks_response_one() {
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 1, &[])));
         link.upload_helper(b"SOBYTES").unwrap();
     }
 
     #[test]
-    fn upload_helper_errors_on_nonzero_response_byte() {
-        let mut reply = [0u8; vendor::SENSER_HEADER_LEN];
-        reply[vendor::SENSER_HEADER_LEN - 1] = 0x7;
-        let mut link = gated_link(MockSenserIo::new(vec![reply.to_vec()]));
+    fn upload_helper_errors_on_response_zero() {
+        // FileControl needs exactly response==1; 0 (MemoryDump's own code) must fail.
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 0, &[])));
         let err = link.upload_helper(b"SOBYTES").unwrap_err();
-        assert!(matches!(err, Error::Usb(ref s) if s.contains("response byte")));
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("pFunc")));
     }
 
     #[test]
-    fn apply_blob_sends_all_four_frames_and_checks_shell_results() {
-        let ok4 = vec![0u8; 4]; // UsbShellResponse result=0 -> ok
-        let replies = vec![ok4.clone(), ok4.clone(), ok4.clone(), vec![b'O', b'K']];
-        let mut link = gated_link(MockSenserIo::new(replies));
+    fn apply_blob_writes_file_then_toggles_terminal_end_to_end() {
+        // seq 1: writeFile (FileControl, needs 1). seq 2/3: setTerminalEnable(true)
+        // (ProductInfo needs 1; AdjustControl best-effort). write_terminal sends the
+        // invocation line raw, no reply consumed. seq 4/5: setTerminalEnable(false),
+        // same shape.
+        let mut frames = Vec::new();
+        frames.extend(senser_reply_frames(1, 1, &[]));
+        frames.extend(senser_reply_frames(2, 1, &[]));
+        frames.extend(senser_reply_frames(3, 0, &[]));
+        frames.extend(senser_reply_frames(4, 1, &[]));
+        frames.extend(senser_reply_frames(5, 0, &[]));
+        let mut link = gated_link(MockSenserIo::new(frames));
         link.apply_blob(b"BLOBDATA").unwrap();
     }
 
     #[test]
-    fn apply_blob_errors_when_a_shell_response_has_the_error_bit() {
-        let ok4 = vec![0u8; 4];
-        let mut bad4 = vec![0u8; 4];
-        bad4[3] = 0x80; // LE u32 0x8000_0000 -> SHELL_RESULT_ERROR_BIT set
-        let replies = vec![ok4.clone(), bad4, ok4.clone(), vec![0u8; 4]];
-        let mut link = gated_link(MockSenserIo::new(replies));
+    fn apply_blob_errors_when_file_write_response_is_wrong() {
+        let mut link = gated_link(MockSenserIo::new(senser_reply_frames(1, 0, &[])));
         let err = link.apply_blob(b"BLOBDATA").unwrap_err();
-        assert!(matches!(err, Error::Usb(ref s) if s.contains("error bit")));
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("pFunc")));
+    }
+
+    #[test]
+    fn apply_blob_errors_when_terminal_enable_product_info_fails() {
+        let mut frames = Vec::new();
+        frames.extend(senser_reply_frames(1, 1, &[])); // writeFile ok
+        frames.extend(senser_reply_frames(2, 0, &[])); // ProductInfo term-change: wrong, needs 1
+        let mut link = gated_link(MockSenserIo::new(frames));
+        let err = link.apply_blob(b"BLOBDATA").unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("pFunc")));
     }
 
     #[test]
