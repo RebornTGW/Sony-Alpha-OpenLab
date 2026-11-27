@@ -541,6 +541,54 @@ off the SD card. Requires Pillow + numpy (`pip install pillow numpy`).
 
 ---
 
+## 🖥️ Monitoring & Quick-Switch HUD (`monitor_hud.py`)
+
+A dark-mode on-screen overlay for framing and instant mode switching while
+shooting — webcam/HDMI capture, a video file, or a folder of images/`.ARW`.
+It never touches camera RAM itself: every real-hardware action is a plain
+`opengate-rs.exe` subprocess call using that tool's own already-gated flags
+(`--confirm-ram-write`, etc.) — the HUD invents no new write path.
+
+```bash
+# Demo mode: synthetic 3:2 test frame, simulated mode switching, no camera
+python monitor_hud.py --demo
+
+# Webcam / HDMI capture card as the monitor source
+python monitor_hud.py --source 0 --exe host-injector/target/release/opengate-rs.exe
+
+# A folder of frames (or .ARW files - shown via their embedded JPEG preview)
+python monitor_hud.py --source ./frames
+```
+
+| Key | Does |
+|---|---|
+| `1` | Quick-Switch → Stock 16:9 (`3840x2160`). **No software restore exists** — this project is RAM-only by design; the real revert is a cold boot / battery pull (~10 s). `--demo` dry-runs `--plan` instead. |
+| `2` | Quick-Switch → 4K Open Gate 3:2 (`3840x2560`). Live hardware needs an explicit in-HUD confirm before it will run `--confirm-ram-write`; `--demo` dry-runs `--plan`. |
+| `3` | Quick-Switch → Live Ghosting / Multi-Exposure overlay (reuses `multi_exposure.py`'s blend modes) |
+| `H` | toggle the Quick-Switch menu |
+| `G` | cycle framing guides: **All** (3:2 + 16:9 + 9:16) → **16:9 only** → **9:16 only** → **Off** |
+| `I` | toggle the top-right status pill (RAM state · active profile · `DEMO`/`LIVE USB`) |
+| `W` | toggle the bottom-left luma waveform (0–100 IRE, off by default) |
+| `M` | (mode 3) cycle the ghosting blend mode: `dark` → `bright` → `avg` → `add` |
+| `Space` | (mode 3) freeze the current frame as the ghost reference |
+| `Q` | quit |
+
+**Framing guides** draw all three Open Gate crops at once by default: the full
+3:2 frame, a 16:9 center crop (exactly `3840x2160` on the real sensor — the
+stock resolution, letterboxed top/bottom with corner ticks), and a 9:16 center
+crop (exactly `1440x2560`, pillarboxed left/right) for vertical Reels/Shorts
+framing — all computed from whatever the live frame's actual size is, so the
+same math holds in `--demo` at a smaller resolution too.
+
+**Waveform** is a compact luma scope (BT.601, nearest-column sampled — good
+enough to judge exposure at a glance, not a broadcast-grade tool) with a red
+line at **94 IRE**, S-Log3's highlight clip point.
+
+Needs OpenCV (`pip install opencv-python`); `.ARW` folder previews need `rawpy`
+(same as `--live-ghost`, see above).
+
+---
+
 ## 📱 Mobile RAM-only loading (no PC, on the go)
 
 The session is **volatile** (gone at power-off), so loading it in the field is the
@@ -828,6 +876,7 @@ Sony-Open-Gate-Lab/
 ├── probe_a6700.py       # read-only USB diagnostic probe
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking
+├── monitor_hud.py       # dark-mode monitoring/quick-switch HUD (framing guides, waveform)
 ├── ram_opengate.py      # volatile RAM Open Gate helper (Mass Storage, research)
 ├── opengate_inject.py   # single-session Open Gate injector (loads profiles/)
 ├── host-injector/       # native rewrite, host side (Rust + rusb) + README

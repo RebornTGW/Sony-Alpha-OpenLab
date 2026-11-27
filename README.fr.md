@@ -603,6 +603,57 @@ ex. des vues copiées de la carte SD. Nécessite Pillow + numpy (`pip install pi
 
 ---
 
+## 🖥️ HUD de monitoring & bascule rapide (`monitor_hud.py`)
+
+Un overlay sombre à l'écran pour le cadrage et la bascule instantanée de mode
+pendant la prise de vue — webcam/capture HDMI, un fichier vidéo, ou un dossier
+d'images/`.ARW`. Il ne touche jamais lui-même la RAM de la caméra : chaque
+action matériel réel est un simple appel au sous-processus `opengate-rs.exe`,
+via les options déjà verrouillées de cet outil (`--confirm-ram-write`, etc.) —
+le HUD n'invente aucun nouveau chemin d'écriture.
+
+```bash
+# Mode démo : image de test 3:2 synthétique, bascule simulée, sans caméra
+python monitor_hud.py --demo
+
+# Webcam / carte de capture HDMI comme source de monitoring
+python monitor_hud.py --source 0 --exe host-injector/target/release/opengate-rs.exe
+
+# Un dossier de vues (ou de fichiers .ARW - affichés via leur aperçu JPEG embarqué)
+python monitor_hud.py --source ./frames
+```
+
+| Touche | Fait |
+|---|---|
+| `1` | Bascule rapide → Stock 16:9 (`3840x2160`). **Aucune restauration logicielle n'existe** — ce projet est RAM uniquement par conception ; la vraie restauration est un redémarrage à froid / retrait de la batterie (~10 s). `--demo` lance `--plan` à vide à la place. |
+| `2` | Bascule rapide → 4K Open Gate 3:2 (`3840x2560`). Sur matériel réel, nécessite une confirmation explicite dans le HUD avant de lancer `--confirm-ram-write` ; `--demo` lance `--plan` à vide. |
+| `3` | Bascule rapide → superposition Live Ghosting / Multi-exposition (réutilise les modes de fusion de `multi_exposure.py`) |
+| `H` | affiche/masque le menu de bascule rapide |
+| `G` | fait défiler les guides de cadrage : **Tous** (3:2 + 16:9 + 9:16) → **16:9 seul** → **9:16 seul** → **Désactivé** |
+| `I` | affiche/masque le badge de statut en haut à droite (état RAM · profil actif · `DEMO`/`LIVE USB`) |
+| `W` | affiche/masque le waveform de luminance en bas à gauche (0–100 IRE, désactivé par défaut) |
+| `M` | (mode 3) fait défiler le mode de fusion du fantôme : `dark` → `bright` → `avg` → `add` |
+| `Espace` | (mode 3) fige la vue courante comme référence fantôme |
+| `Q` | quitte |
+
+**Les guides de cadrage** dessinent les trois recadrages Open Gate à la fois
+par défaut : le cadre 3:2 complet, un recadrage centré 16:9 (exactement
+`3840x2160` sur le capteur réel — la résolution stock, en letterbox haut/bas
+avec coins repères), et un recadrage centré 9:16 (exactement `1440x2560`, en
+pillarbox gauche/droite) pour le cadrage vertical Reels/Shorts — tout calculé
+à partir de la taille réelle de la vue, donc le même calcul tient aussi en
+`--demo` à une résolution plus petite.
+
+**Le waveform** est un scope de luminance compact (BT.601, échantillonné par
+colonne la plus proche — suffisant pour juger l'exposition d'un coup d'œil,
+pas un outil de qualité broadcast) avec une ligne rouge à **94 IRE**, le point
+de clip des hautes lumières en S-Log3.
+
+Nécessite OpenCV (`pip install opencv-python`) ; les aperçus de dossier `.ARW`
+nécessitent `rawpy` (comme pour `--live-ghost` ci-dessus).
+
+---
+
 ## 📱 Chargement RAM-only mobile (sans PC, en déplacement)
 
 La session est **volatile** (perdue à l'extinction) ; la charger sur le terrain est le
@@ -799,6 +850,7 @@ Sony-Open-Gate-Lab/
 ├── probe_a6700.py       # sonde diagnostic USB lecture seule
 ├── experiment_a6700.py  # écritures de session (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # capture multi-exposition automatisée + empilement optionnel
+├── monitor_hud.py       # HUD de monitoring/bascule rapide (guides de cadrage, waveform)
 ├── ram_opengate.py      # Open Gate RAM volatile (Mass Storage, recherche)
 ├── opengate_inject.py   # injecteur Open Gate mono-session (charge profiles/)
 ├── profiles/            # tables de patch Open Gate déclaratives (JSON) + README du format

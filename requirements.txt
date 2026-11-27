@@ -12,6 +12,8 @@ numpy>=1.26.0
 rawpy>=0.19.0
 tifffile>=2024.1.30
 
-# Optional live ghost preview in multi_exposure.py (--live-ghost).
+# Optional live ghost preview in multi_exposure.py (--live-ghost), and
+# monitor_hud.py (the Monitoring & Quick-Switch HUD - framing guides, status
+# pill, waveform, Quick-Switch menu all need a window to draw into).
 # Install separately with: pip install opencv-python
 # opencv-python>=4.8.0
