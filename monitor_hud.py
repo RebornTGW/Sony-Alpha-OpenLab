@@ -30,7 +30,9 @@ Keys:
               the ghost reference instantly, no [Space]/--ghost-ref needed;
               the first capture defaults to a 50/50 "avg" blend
   H           toggle the Quick-Switch menu
-  G           cycle framing guides: All -> 16:9 only -> 9:16 only -> Off
+  G           cycle framing guides: active mode's frame -> + 9:16 overlay -> Off
+              (shows 16:9 in Stock mode, 3:2 in Open Gate/ghosting mode - never
+              both at once, so the two boxes never visually collide)
   I           toggle the status pill
   W           toggle the luma/RGB waveform
   M           (ghosting mode) cycle blend mode: dark -> bright -> avg -> add
@@ -51,7 +53,11 @@ import multi_exposure as me  # reuse compose_ghost_preview / RAW_BLEND_MODES
 # subprocess: every function here is independently unit-testable.
 # ---------------------------------------------------------------------------
 
-GUIDE_MODES = ("all", "16:9", "9:16", "off")
+#: "main" is whichever single aspect the active Quick-Switch mode frames for
+#: (16:9 for Stock, 3:2 for Open Gate/ghosting - see `_primary_aspect_for_mode`)
+#: - never both 16:9 and 3:2 at once, so the two boxes never visually collide.
+#: "main+9:16" adds the vertical Reels/Shorts safe-zone guide on top of that.
+GUIDE_MODES = ("main", "main+9:16", "off")
 MODE_STOCK = "stock"
 MODE_OPEN_GATE = "open_gate"
 MODE_GHOST = "ghost"
@@ -100,7 +106,7 @@ def crop_box_9x16(width, height):
 
 
 def cycle_guide_mode(current):
-    """Advance to the next framing-guide mode: all -> 16:9 -> 9:16 -> off -> all."""
+    """Advance to the next framing-guide mode: main -> main+9:16 -> off -> main."""
     if current not in GUIDE_MODES:
         raise ValueError(f"unknown guide mode {current!r}, want one of {GUIDE_MODES}")
     i = GUIDE_MODES.index(current)
@@ -278,12 +284,14 @@ def _dim_outside_box(frame, box, opacity=GUIDE_DIM_OPACITY):
 
 
 def _draw_ratio_label(frame, box, text, color):
-    """Crisp ratio label (e.g. "3:2") at the top-left corner of `box` - a dark
-    outline pass then the color on top, so it reads over any background."""
+    """Crisp ratio label (e.g. "3:2") at the BOTTOM-left corner of `box`, just
+    inside it - the top-left corner is where the Quick-Switch menu panel
+    lives, so a top-left label would collide with it there. A dark outline
+    pass then the color on top, so it reads over any background."""
     import cv2
 
-    x, y, _w, _h = box
-    pos = (x + 6, y + 20)
+    x, y, _w, h = box
+    pos = (x + 6, y + h - 10)
     cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 3, cv2.LINE_AA)
     cv2.putText(frame, text, pos, cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 1, cv2.LINE_AA)
 
@@ -297,26 +305,30 @@ def _draw_one_guide_box(frame, box, label, color):
     _draw_ratio_label(frame, box, label, color)
 
 
-def _draw_guides(frame, guide_mode):
-    """Draw the active framing guide(s). Only one box gets the outside-dim
-    treatment at a time (the "active" one named in `guide_mode`) so nested
-    boxes in "all" mode don't compound into a muddy multi-layered dim; the
-    other box outlines in "all" are still drawn, just without their own dim."""
+def _primary_aspect_for_mode(active_mode):
+    """Which single aspect is the primary framing guide for a Quick-Switch
+    mode: [1] Stock shows 16:9 (what actually gets recorded without Open
+    Gate); [2] Open Gate and [3] ghosting both show 3:2 (the Open Gate frame
+    itself). Only ever one of the two, never both at once - that's what keeps
+    the 16:9 and 3:2 boxes from ever visually colliding."""
+    return "16:9" if active_mode == MODE_STOCK else "3:2"
+
+
+def _draw_guides(frame, guide_mode, active_mode):
+    """Draw the active framing guide(s): the single aspect `active_mode`
+    frames for (never both 16:9 and 3:2 at once), plus the 9:16 vertical
+    safe-zone guide on top of it when `guide_mode` asks for it too. Only the
+    primary box gets the outside-dim treatment, so adding the 9:16 overlay
+    doesn't compound into a muddy multi-layered dim."""
+    if guide_mode == "off":
+        return frame
     h, w = frame.shape[:2]
-    if guide_mode == "all":
-        box_3x2 = crop_box_3x2(w, h)
-        _dim_outside_box(frame, box_3x2)
-        _draw_one_guide_box(frame, box_3x2, "3:2", GUIDE_COLORS["3:2"])
-        _draw_one_guide_box(frame, crop_box_16x9(w, h), "16:9", GUIDE_COLORS["16:9"])
+    aspect = _primary_aspect_for_mode(active_mode)
+    box = crop_box_16x9(w, h) if aspect == "16:9" else crop_box_3x2(w, h)
+    _dim_outside_box(frame, box)
+    _draw_one_guide_box(frame, box, aspect, GUIDE_COLORS[aspect])
+    if guide_mode == "main+9:16":
         _draw_one_guide_box(frame, crop_box_9x16(w, h), "9:16", GUIDE_COLORS["9:16"])
-    elif guide_mode == "16:9":
-        box = crop_box_16x9(w, h)
-        _dim_outside_box(frame, box)
-        _draw_one_guide_box(frame, box, "16:9", GUIDE_COLORS["16:9"])
-    elif guide_mode == "9:16":
-        box = crop_box_9x16(w, h)
-        _dim_outside_box(frame, box)
-        _draw_one_guide_box(frame, box, "9:16", GUIDE_COLORS["9:16"])
     return frame
 
 
@@ -504,7 +516,7 @@ def initial_hud_state():
     """The HUD's starting state - see `handle_key()`."""
     return {
         "menu_visible": True,
-        "guide_mode": "all",
+        "guide_mode": "main+9:16",
         "status_visible": True,
         "waveform_visible": False,
         "active_mode": MODE_OPEN_GATE,
@@ -565,7 +577,7 @@ def handle_key(key, state, frame, demo=False, exe_path="opengate-rs.exe", profil
         else:
             state["cli_standby"] = True
             if state["guide_mode"] == "off":
-                state["guide_mode"] = "all"
+                state["guide_mode"] = "main+9:16"
     elif key == ord("3"):
         if state["ghost_ref"] is None:
             state["blend_mode"] = "avg"
@@ -614,8 +626,7 @@ def monitor_hud(source, demo=False, exe_path="opengate-rs.exe", profile=DEFAULT_
                     ref = cv2.resize(ref, (display.shape[1], display.shape[0]))
                 display = me.compose_ghost_preview(display, [ref], state["blend_mode"])
 
-            if state["guide_mode"] != "off":
-                _draw_guides(display, state["guide_mode"])
+            _draw_guides(display, state["guide_mode"], state["active_mode"])
             if state["status_visible"]:
                 pill = format_status_pill(state["ram_state"], profile, demo, cli_standby=state["cli_standby"])
                 _draw_status_pill(display, pill)

@@ -70,11 +70,11 @@ class TestCropBoxMath(unittest.TestCase):
 
 
 class TestGuideAndBlendModeCycling(unittest.TestCase):
-    def test_guide_mode_cycles_all_four_in_order_and_wraps(self):
+    def test_guide_mode_cycles_in_order_and_wraps(self):
         seq = [hud.GUIDE_MODES[0]]
         for _ in range(len(hud.GUIDE_MODES)):
             seq.append(hud.cycle_guide_mode(seq[-1]))
-        self.assertEqual(seq, ["all", "16:9", "9:16", "off", "all"])
+        self.assertEqual(seq, ["main", "main+9:16", "off", "main"])
 
     def test_guide_mode_rejects_unknown_value(self):
         with self.assertRaises(ValueError):
@@ -389,7 +389,7 @@ class TestHandleKey(unittest.TestCase):
         state["guide_mode"] = "off"
         with mock.patch("subprocess.run", side_effect=FileNotFoundError()):
             state = hud.handle_key(ord("2"), state, self.frame, demo=False)
-        self.assertEqual(state["guide_mode"], "all")
+        self.assertEqual(state["guide_mode"], "main+9:16")
 
     def test_key_2_failure_leaves_existing_guide_mode_alone(self):
         state = hud.initial_hud_state()
@@ -441,6 +441,77 @@ class TestHandleKey(unittest.TestCase):
         original = dict(state)
         hud.handle_key(ord("g"), state, self.frame)
         self.assertEqual(state, original)
+
+
+class TestPrimaryAspectForMode(unittest.TestCase):
+    def test_stock_is_16x9(self):
+        self.assertEqual(hud._primary_aspect_for_mode(hud.MODE_STOCK), "16:9")
+
+    def test_open_gate_is_3x2(self):
+        self.assertEqual(hud._primary_aspect_for_mode(hud.MODE_OPEN_GATE), "3:2")
+
+    def test_ghost_is_3x2(self):
+        self.assertEqual(hud._primary_aspect_for_mode(hud.MODE_GHOST), "3:2")
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestDrawGuidesActiveAspectOnly(unittest.TestCase):
+    """_draw_guides() now shows only the single aspect the active mode frames
+    for (16:9 for Stock, 3:2 for Open Gate/ghosting) - never both at once, so
+    the two boxes can't visually collide. Tested by mocking _draw_one_guide_box
+    to see exactly which box(es) get drawn, rather than inspecting rendered
+    pixels (which would collide with legitimate border/tick/label drawing)."""
+
+    def test_stock_mode_draws_only_16x9(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        with mock.patch.object(hud, "_draw_one_guide_box") as draw_box:
+            hud._draw_guides(frame, "main", hud.MODE_STOCK)
+        draw_box.assert_called_once()
+        self.assertEqual(draw_box.call_args[0][2], "16:9")
+
+    def test_open_gate_mode_draws_only_3x2(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        with mock.patch.object(hud, "_draw_one_guide_box") as draw_box:
+            hud._draw_guides(frame, "main", hud.MODE_OPEN_GATE)
+        draw_box.assert_called_once()
+        self.assertEqual(draw_box.call_args[0][2], "3:2")
+
+    def test_ghost_mode_draws_only_3x2(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        with mock.patch.object(hud, "_draw_one_guide_box") as draw_box:
+            hud._draw_guides(frame, "main", hud.MODE_GHOST)
+        self.assertEqual(draw_box.call_args[0][2], "3:2")
+
+    def test_main_plus_9x16_adds_a_second_call_for_9x16(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        with mock.patch.object(hud, "_draw_one_guide_box") as draw_box:
+            hud._draw_guides(frame, "main+9:16", hud.MODE_OPEN_GATE)
+        self.assertEqual(draw_box.call_count, 2)
+        labels = [c[0][2] for c in draw_box.call_args_list]
+        self.assertEqual(labels, ["3:2", "9:16"])
+
+    def test_off_draws_nothing(self):
+        frame = np.zeros((10, 10, 3), dtype=np.uint8)
+        with mock.patch.object(hud, "_draw_one_guide_box") as draw_box:
+            hud._draw_guides(frame, "off", hud.MODE_OPEN_GATE)
+        draw_box.assert_not_called()
+
+
+@unittest.skipUnless(HAVE_NUMPY, "numpy required")
+class TestRatioLabelPosition(unittest.TestCase):
+    """The ratio label moved to the bottom-left of the crop box (top-left
+    collided with the Quick-Switch menu panel)."""
+
+    def test_label_position_is_near_the_bottom_left_of_the_box(self):
+        box = (10, 20, 100, 200)  # x, y, w, h -> bottom edge at y+h=220
+        with mock.patch("cv2.putText") as put_text:
+            hud._draw_ratio_label(np.zeros((300, 300, 3), dtype=np.uint8), box, "3:2", (0, 255, 0))
+        self.assertEqual(put_text.call_count, 2)
+        pos = put_text.call_args_list[0][0][2]  # positional arg index 2 = pos
+        x, y, w, h = box
+        self.assertEqual(pos[0], x + 6)
+        self.assertGreater(pos[1], y + h // 2)  # clearly in the lower half of the box
+        self.assertLess(pos[1], y + h)  # still inside the box, not below it
 
 
 if __name__ == "__main__":
