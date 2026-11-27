@@ -899,6 +899,10 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
   HAITA 3:2 lock).
 - [`docs/PROTOCOL.en.md`](docs/PROTOCOL.en.md) (EN) / [`docs/PROTOCOL.md`](docs/PROTOCOL.md) (FR)
   — PTP / "SDIO" protocol architecture.
+- [`docs/BIONZ_XR_PTP_SDIO.md`](docs/BIONZ_XR_PTP_SDIO.md) — why the legacy
+  BIONZ X Senser path stalls on BIONZ XR, the verified PTP/SDIO v300 handshake
+  and `0x9209` property-record format, and the `sdio_probe.py` read-only
+  decoder (`--dump-bin` / `--parse-bin` / `--json`).
 - [`docs/DEVICE_PROPERTIES.en.md`](docs/DEVICE_PROPERTIES.en.md) (EN) /
   [`docs/DEVICE_PROPERTIES.md`](docs/DEVICE_PROPERTIES.md) (FR)
   — full table of the **386** `DevicePropCode` / control codes.
@@ -912,6 +916,9 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
 Sony-Open-Gate-Lab/
 ├── cameras/             # 14 BIONZ XR body profiles (USB identity) + cameras.py loader
 ├── probe_a6700.py       # read-only USB diagnostic probe
+├── sdio_probe.py        # read-only 0x9209 SDIO v300 decoder (dump/parse/json)
+├── scripts/
+│   └── probe_a6700_sdio.py  # CLI entrypoint for sdio_probe.py
 ├── experiment_a6700.py  # session-only write experiments (opt-in, --confirm-session-write)
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking
 ├── monitor_hud.py       # dark-mode monitoring/quick-switch HUD (framing guides, waveform)
@@ -930,6 +937,7 @@ Sony-Open-Gate-Lab/
 │   ├── PROTOCOL.en.md / PROTOCOL.md              # protocol architecture (EN / FR)
 │   ├── DEVICE_PROPERTIES.en.md / .md             # 386-code table (EN / FR)
 │   ├── RESULTS.en.md / RESULTS.md                # live experimental results (EN / FR)
+│   ├── BIONZ_XR_PTP_SDIO.md                      # PTP/SDIO v300 handshake + 0x9209 format
 │   ├── ROADMAP.en.md / ROADMAP.md                # milestones & next steps (EN / FR)
 │   └── proofs/                                   # anonymized log extracts + proof screenshots
 └── README.md / README.fr.md                      # this file (EN / FR)

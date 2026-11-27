@@ -1,0 +1,307 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""Unit tests for sdio_probe.py: GetDeviceInfo parsing (reused from
+probe_a6700) and the SDIO v300 GetAllExtDevicePropInfo (0x9209) binary
+decoder - built and checked entirely against synthetic byte fixtures, no
+live USB/camera required.
+
+Run from the repo root:  python -m unittest -v tests.test_sdio_probe
+"""
+import json
+import os
+import struct
+import sys
+import tempfile
+import unittest
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+import sdio_probe as sp
+from probe_a6700 import parse_device_info
+
+
+def _ptp_string(s: str) -> bytes:
+    """PTP string: 1 byte char count (incl. trailing NUL) + UTF-16LE."""
+    if not s:
+        return b"\x00"
+    text = s + "\x00"
+    return bytes([len(text)]) + text.encode("utf-16-le")
+
+
+def _u16_array(vals) -> bytes:
+    return struct.pack("<I", len(vals)) + b"".join(struct.pack("<H", v) for v in vals)
+
+
+def _record_header(code: int, dtype: int, getset: int, enabled: int) -> bytes:
+    # code(2) type(2) getset(1) enable(1) extra(1) - the Sony extra byte at
+    # +6 is skipped by the decoder, matching the verified-live layout.
+    return struct.pack("<HHBBB", code, dtype, getset, enabled, 0)
+
+
+def _scalar(dtype: int, value) -> bytes:
+    if dtype == 0xFFFF:
+        return _ptp_string(value)
+    size = sp.PTP_BASE_TYPES[dtype][1]
+    return int(value).to_bytes(size, "little", signed=value < 0)
+
+
+def build_none_record(code=0xD211, dtype=0x0004, value=2) -> bytes:
+    """form=0x00 (None): just default + current, no range/enum tail."""
+    return (
+        _record_header(code, dtype, getset=1, enabled=1)
+        + _scalar(dtype, value)  # default
+        + _scalar(dtype, value)  # current
+        + bytes([0x00])  # form = none
+    )
+
+
+def build_range_record(code=0x500E, dtype=0x0006, vmin=0, vmax=100, step=1,
+                        default=0, current=50) -> bytes:
+    return (
+        _record_header(code, dtype, getset=1, enabled=1)
+        + _scalar(dtype, default)
+        + _scalar(dtype, current)
+        + bytes([0x01])
+        + _scalar(dtype, vmin)
+        + _scalar(dtype, vmax)
+        + _scalar(dtype, step)
+    )
+
+
+def build_enum_record(code=0x5013, dtype=0x0004, values=(1, 2, 3, 4),
+                       default=1, current=2, available=None) -> bytes:
+    body = (
+        _record_header(code, dtype, getset=1, enabled=1)
+        + _scalar(dtype, default)
+        + _scalar(dtype, current)
+        + bytes([0x02])
+        + struct.pack("<H", len(values))
+        + b"".join(_scalar(dtype, v) for v in values)
+    )
+    if available is not None:
+        body += struct.pack("<H", len(available)) + b"".join(
+            _scalar(dtype, v) for v in available
+        )
+    return body
+
+
+def build_array_record(code=0xD219, values=(10, 20, 30), default=(), current=None) -> bytes:
+    dtype = 0x0004 | sp.PTP_ARRAY_FLAG  # ARRAY<UINT16>
+    cur = current if current is not None else values
+    return (
+        _record_header(code, dtype, getset=0, enabled=1)
+        + _u16_array(default)
+        + _u16_array(cur)
+        + bytes([0x00])
+    )
+
+
+def build_string_record(code=0xD21D, value="S-Log3", default="", current=None) -> bytes:
+    dtype = 0xFFFF
+    cur = current if current is not None else value
+    return (
+        _record_header(code, dtype, getset=1, enabled=1)
+        + _scalar(dtype, default)
+        + _scalar(dtype, cur)
+        + bytes([0x00])
+    )
+
+
+class TestTypeName(unittest.TestCase):
+    def test_scalar_name(self):
+        self.assertEqual(sp._type_name(0x0004), "UINT16")
+
+    def test_array_name(self):
+        self.assertEqual(sp._type_name(0x0004 | sp.PTP_ARRAY_FLAG), "ARRAY<UINT16>")
+
+    def test_string_name(self):
+        self.assertEqual(sp._type_name(0xFFFF), "STR")
+
+
+class TestParseExtDevicePropRecordNone(unittest.TestCase):
+    def test_decodes_current_and_default(self):
+        data = build_none_record(code=0xD211, dtype=0x0004, value=2)
+        record, end = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["code"], 0xD211)
+        self.assertEqual(record["current"], 2)
+        self.assertEqual(record["default"], 2)
+        self.assertEqual(record["form"], sp.FORM_NONE)
+        self.assertIsNone(record["range"])
+        self.assertIsNone(record["enum"])
+        self.assertEqual(end, len(data))
+
+    def test_getset_and_enabled_flags(self):
+        data = (
+            _record_header(0x5013, 0x0004, getset=0, enabled=0)
+            + _scalar(0x0004, 1) + _scalar(0x0004, 1) + bytes([0x00])
+        )
+        record, _ = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["getset"], "Get only")
+        self.assertFalse(record["enabled"])
+
+
+class TestParseExtDevicePropRecordRange(unittest.TestCase):
+    def test_decodes_min_max_step(self):
+        data = build_range_record(vmin=10, vmax=200, step=5, current=50)
+        record, end = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["form"], sp.FORM_RANGE)
+        self.assertEqual(record["range"], {"min": 10, "max": 200, "step": 5})
+        self.assertEqual(record["current"], 50)
+        self.assertEqual(end, len(data))
+
+
+class TestParseExtDevicePropRecordEnum(unittest.TestCase):
+    def test_decodes_supported_values(self):
+        data = build_enum_record(values=(1, 2, 3, 4), current=3)
+        record, end = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["form"], sp.FORM_ENUM)
+        self.assertEqual(record["enum"], [1, 2, 3, 4])
+        self.assertEqual(record["current"], 3)
+        self.assertIsNone(record["available"])
+        self.assertEqual(end, len(data))
+
+    def test_dual_enum_off_by_default_leaves_available_none(self):
+        data = build_enum_record(values=(1, 2, 3), available=(1, 3))
+        record, end = sp.parse_ext_device_prop_record(data, assume_dual_enum=False)
+        self.assertIsNone(record["available"])
+        # Without --assume-dual-enum the trailing "available" bytes are left
+        # unconsumed (the caller treats them as the start of the next record).
+        self.assertLess(end, len(data))
+
+    def test_dual_enum_on_reads_available_list(self):
+        data = build_enum_record(values=(1, 2, 3), available=(1, 3))
+        record, end = sp.parse_ext_device_prop_record(data, assume_dual_enum=True)
+        self.assertEqual(record["available"], [1, 3])
+        self.assertEqual(end, len(data))
+
+
+class TestParseExtDevicePropRecordArray(unittest.TestCase):
+    def test_decodes_uint16_array(self):
+        data = build_array_record(values=(10, 20, 30))
+        record, end = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["dtype_name"], "ARRAY<UINT16>")
+        self.assertEqual(record["current"], [10, 20, 30])
+        self.assertEqual(end, len(data))
+
+
+class TestParseExtDevicePropRecordString(unittest.TestCase):
+    def test_decodes_utf16_string(self):
+        data = build_string_record(value="S-Log3")
+        record, end = sp.parse_ext_device_prop_record(data)
+        self.assertEqual(record["dtype_name"], "STR")
+        self.assertEqual(record["current"], "S-Log3")
+        self.assertEqual(end, len(data))
+
+
+class TestParseExtDevicePropRecordErrors(unittest.TestCase):
+    def test_truncated_header_raises(self):
+        with self.assertRaises(sp.SdioDecodeError):
+            sp.parse_ext_device_prop_record(b"\x01\x02")
+
+    def test_unknown_dtype_raises(self):
+        data = _record_header(0xD211, 0x1234, getset=1, enabled=1) + b"\x00" * 4
+        with self.assertRaises(sp.SdioDecodeError):
+            sp.parse_ext_device_prop_record(data)
+
+    def test_unknown_form_flag_raises(self):
+        data = (
+            _record_header(0xD211, 0x0004, getset=1, enabled=1)
+            + _scalar(0x0004, 1) + _scalar(0x0004, 1) + bytes([0x99])
+        )
+        with self.assertRaises(sp.SdioDecodeError):
+            sp.parse_ext_device_prop_record(data)
+
+
+class TestParseAllExtPropInfoStream(unittest.TestCase):
+    def test_decodes_a_back_to_back_stream_of_mixed_records(self):
+        stream = (
+            build_none_record(code=0xD211, value=2)
+            + build_range_record(code=0x500E, vmin=0, vmax=100, step=1, current=40)
+            + build_enum_record(code=0x5013, values=(1, 2, 3), current=2)
+            + build_array_record(code=0xD219, values=(1, 2))
+            + build_string_record(code=0xD21D, value="Movie")
+        )
+        records = sp.parse_all_ext_prop_info(stream)
+        self.assertEqual([r["code"] for r in records],
+                         [0xD211, 0x500E, 0x5013, 0xD219, 0xD21D])
+        self.assertEqual(records[0]["current"], 2)
+        self.assertEqual(records[1]["range"]["max"], 100)
+        self.assertEqual(records[2]["enum"], [1, 2, 3])
+        self.assertEqual(records[3]["current"], [1, 2])
+        self.assertEqual(records[4]["current"], "Movie")
+
+    def test_stops_cleanly_on_a_trailing_garbage_tail(self):
+        stream = build_none_record(code=0xD211, value=1) + b"\xFF\xFF\xFF"
+        records = sp.parse_all_ext_prop_info(stream)
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["code"], 0xD211)
+
+    def test_empty_stream_decodes_to_no_records(self):
+        self.assertEqual(sp.parse_all_ext_prop_info(b""), [])
+
+
+class TestRecordsToJson(unittest.TestCase):
+    def test_keys_are_hex_coded(self):
+        records = sp.parse_all_ext_prop_info(build_none_record(code=0xD211, value=1))
+        out = sp.records_to_json(records)
+        self.assertIn("0xD211", out)
+        self.assertEqual(out["0xD211"]["current"], 1)
+
+
+class TestParseBinCliOfflineRoundTrip(unittest.TestCase):
+    """--parse-bin needs no camera: dump synthetic bytes to a temp file and
+    decode + export JSON exactly like the CLI does."""
+
+    def test_parse_bin_then_json_round_trips(self):
+        stream = (
+            build_none_record(code=0xD211, value=1)
+            + build_enum_record(code=0x5013, values=(1, 2), current=1)
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            bin_path = os.path.join(tmp, "dump.bin")
+            json_path = os.path.join(tmp, "out.json")
+            with open(bin_path, "wb") as fh:
+                fh.write(stream)
+
+            with open(bin_path, "rb") as fh:
+                raw = fh.read()
+            records = sp.parse_all_ext_prop_info(raw)
+            with open(json_path, "w", encoding="utf-8") as fh:
+                json.dump(sp.records_to_json(records), fh)
+
+            with open(json_path, "r", encoding="utf-8") as fh:
+                decoded = json.load(fh)
+        self.assertIn("0xD211", decoded)
+        self.assertIn("0x5013", decoded)
+        self.assertEqual(decoded["0xD211"]["current"], 1)
+        self.assertEqual(decoded["0x5013"]["enum"], [1, 2])
+
+
+class TestDeviceInfoParsingReuse(unittest.TestCase):
+    """sdio_probe re-exports parse_device_info from probe_a6700 rather than
+    duplicating it - a synthetic GetDeviceInfo dataset should decode the
+    same way through either import path."""
+
+    def test_parses_a_synthetic_device_info_dataset(self):
+        data = (
+            struct.pack("<HIH", 100, 0x00000011, 0x0012C)
+            + _ptp_string("Sony Corp.")
+            + struct.pack("<H", 0)  # functional mode
+            + _u16_array([0x1001, 0x1002, 0x9201, 0x9209])
+            + _u16_array([0xC201])
+            + _u16_array([0xD211, 0xD241])
+            + _u16_array([])
+            + _u16_array([])
+            + _ptp_string("Sony Corp.")
+            + _ptp_string("ILCE-6700")
+            + _ptp_string("2.00")
+            + _ptp_string("")
+        )
+        info = parse_device_info(data)
+        self.assertEqual(info["model"], "ILCE-6700")
+        self.assertEqual(info["device_version"], "2.00")
+        self.assertIn(0x9201, info["operations_supported"])
+
+
+if __name__ == "__main__":
+    unittest.main()
