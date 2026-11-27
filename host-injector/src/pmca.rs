@@ -11,9 +11,9 @@
 //!   2. a runtime `allow_unverified` flag (CLI `--allow-unverified-usb`, with an
 //!      interactive confirm) lets a tester send real frames without recompiling.
 //! Even when ungated, steps whose data is EXTERNAL (the Senser key tables + the
-//! SHA1-path hash, and the senser bulk backend) refuse rather than guess. There is
-//! no `ShellExec` opcode in PMCA-RE: a binary runs via the `SHEL` interactive relay.
-//! No fabricated vendor bytes are ever put on the wire.
+//! SHA1-path hash) refuse rather than guess. There is no `ShellExec` opcode in
+//! PMCA-RE: a binary runs via the `SHEL` interactive relay. No fabricated vendor
+//! bytes are ever put on the wire.
 
 use serde::Deserialize;
 
@@ -313,6 +313,37 @@ pub fn helper_invocation(path: &str) -> Vec<u8> {
     let mut v = path.as_bytes().to_vec();
     v.push(b'\n');
     v
+}
+
+/// Decode a `UsbShellResponse` (result INT32; failure when bit `0x8000_0000` is
+/// set) - the reply to a request built by `shell_request()` (PUSH/SHEL/RMEM/
+/// TEST/PULL/EXIT).
+pub fn shell_result_ok(reply: &[u8]) -> Result<()> {
+    if reply.len() < 4 {
+        return Err(Error::Usb("shell reply: short UsbShellResponse".into()));
+    }
+    let result = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]);
+    if result & vendor::SHELL_RESULT_ERROR_BIT != 0 {
+        return Err(Error::Usb(format!("shell reply: result {result:#010x} has the error bit set")));
+    }
+    Ok(())
+}
+
+/// Decode a `SenserPacketHeader` reply's `response` byte (the last byte of the
+/// 12-byte header) - the reply to a request built by `senser_file_frame()` /
+/// `senser_memdump_frame()`. `0` is treated as success, matching this file's
+/// other zero-is-ok conventions (SCSI status, shell result); any other value's
+/// exact meaning per `pFunc` is not cited anywhere fetched, so it is surfaced
+/// as-is rather than interpreted.
+pub fn senser_reply_ok(reply: &[u8]) -> Result<()> {
+    if reply.len() < vendor::SENSER_HEADER_LEN {
+        return Err(Error::Usb("senser reply: short SenserPacketHeader".into()));
+    }
+    let response = reply[vendor::SENSER_HEADER_LEN - 1];
+    if response != 0 {
+        return Err(Error::Usb(format!("senser reply: response byte {response:#x}")));
+    }
+    Ok(())
 }
 
 /// Check a supplied Senser key blob against its cited first-8-byte fingerprint.
@@ -648,32 +679,57 @@ impl<P: BulkPipe> ServiceLink<P> {
         Ok(())
     }
 
-    /// Step 3a: push the compiled helper to the camera (updater shell `PUSH`, then
-    /// usb_transfer_write). Request framing is built; the send needs a connected shell.
+    /// Step 3a: push the compiled helper to `/tmp` over the Senser bulk channel's
+    /// own FileControl FILE_WRITE (`senser_file_frame`) - we're in Senser mode
+    /// (0x0336) after `enter_service()`, not Updater mode (0x033a/0x03e2), so this
+    /// uses the mode we're actually in rather than the separate Updater-shell `PUSH`
+    /// token. Whole payload in one frame; a real device's practical size limit for
+    /// that is unverified (no chunking is attempted here).
     pub fn upload_helper(&mut self, so_bytes: &[u8]) -> Result<()> {
         self.gate("upload_helper")?;
-        let _req = shell_request(vendor::SHELL_PUSH, vendor::HELPER_PATH.as_bytes());
-        let _ = so_bytes; // body streams via usb_transfer_write (transfer.py UsbDataMsg)
-        Err(Error::Usb(
-            "upload_helper: PUSH framing is ready (pmca/platform/backend/usb \
-             UsbPlatformBackend.writeFile, token b'PUSH'), but it needs a connected \
-             shell (token b'TEST'), which needs service mode - blocked on enter_service."
-                .into(),
-        ))
+        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+            Error::Usb("upload_helper: no SenserIo wired. Call set_senser_io() first.".into())
+        })?;
+        let frame = senser_file_frame(vendor::FILE_WRITE, vendor::HELPER_PATH, so_bytes, 1);
+        io.bulk_out(&frame)?;
+        let mut reply = [0u8; vendor::SENSER_HEADER_LEN];
+        io.bulk_in(&mut reply)?;
+        senser_reply_ok(&reply)
     }
 
     /// Step 3b: PUSH the OGP1 blob to /tmp, then run the helper by typing its path on
-    /// the `SHEL` interactive relay (there is no exec opcode in PMCA-RE). Returns the
-    /// ordered frames the sequence emits.
+    /// the `SHEL` interactive relay (there is no exec opcode in PMCA-RE) - the 4
+    /// frames `exec_helper_sequence()` builds, sent in order over the wired
+    /// `SenserIo`. Those frames are shaped for the separate Updater-shell protocol
+    /// (PUSH/SHEL tokens), sent here over the Senser bulk channel per the wiring
+    /// this method is asked to do; whether live firmware actually accepts
+    /// Updater-shell-framed packets while still in Senser mode, versus needing a
+    /// separate re-enumeration into Updater mode first, is unverified - same bucket
+    /// as everything else `VENDOR_PROTOCOL_VERIFIED` gates. A `UsbShellResponse`
+    /// follows each of the first three frames (the PUSH request, the blob-bytes
+    /// data phase, and the SHEL request); the last frame is the plain command line
+    /// typed on the relay, which has no response framing of its own
+    /// (`pmca/shell/interactive.py` just forwards `stdin.readline()`) - whatever
+    /// comes back is read but not validated.
     pub fn apply_blob(&mut self, blob: &[u8]) -> Result<()> {
         self.gate("apply_blob")?;
-        let _frames = self.exec_helper_sequence(blob);
-        Err(Error::Usb(
-            "apply_blob: PUSH->SHEL exec sequence is built (PUSH the blob, open SHEL, \
-             type the helper path), but it needs a connected shell - blocked on \
-             enter_service."
-                .into(),
-        ))
+        let frames = self.exec_helper_sequence(blob);
+        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+            Error::Usb("apply_blob: no SenserIo wired. Call set_senser_io() first.".into())
+        })?;
+        let last = frames.len() - 1;
+        for (i, frame) in frames.iter().enumerate() {
+            io.bulk_out(frame)?;
+            if i < last {
+                let mut reply = [0u8; 4];
+                io.bulk_in(&mut reply)?;
+                shell_result_ok(&reply)?;
+            } else {
+                let mut reply = vec![0u8; vendor::SHELL_DATA_MAX];
+                let _ = io.bulk_in(&mut reply); // best-effort; no framing to validate
+            }
+        }
+        Ok(())
     }
 
     /// Build the ordered frames to push the OGP1 blob and invoke the helper over SHEL:
@@ -688,17 +744,34 @@ impl<P: BulkPipe> ServiceLink<P> {
         ]
     }
 
-    /// Read a RAM region back (updater shell `RMEM`, UsbMemoryReadRequest). Framing is
-    /// built; the send needs a connected shell.
+    /// Read a RAM region back (updater shell `RMEM`, `UsbMemoryReadRequest` via
+    /// `mem_read_request`), sent over the wired `SenserIo`. One transfer, capped at
+    /// `SHELL_DATA_MAX`; callers needing more chunk across multiple calls (see
+    /// `ramdump::dump_ram`). The reply is treated as one plain `UsbDataMsg` (size
+    /// INT32 + data) - whether a real device instead streams a
+    /// `UsbSequenceTransferHeader` + multiple `UsbDataMsg`s + a `UsbStatusMsg` is
+    /// not cited anywhere fetched and is not attempted here.
     fn read_ram(&mut self, addr: u64, len: usize) -> Result<Vec<u8>> {
         self.gate("read_ram")?;
-        let _req = shell_request(vendor::SHELL_RMEM, &mem_read_request(addr as u32, len as u32));
-        Err(Error::Usb(
-            "read_ram: RMEM framing is ready (pmca/platform/backend/usb \
-             UsbPlatformBackend.readMemory, token b'RMEM'), but it needs a connected \
-             shell - blocked on enter_service."
-                .into(),
-        ))
+        if len > vendor::SHELL_DATA_MAX {
+            return Err(Error::Usb(format!(
+                "read_ram: len {len:#x} exceeds one RMEM transfer ({:#x}); callers must chunk.",
+                vendor::SHELL_DATA_MAX
+            )));
+        }
+        let io = self.senser_io.as_deref_mut().ok_or_else(|| {
+            Error::Usb("read_ram: no SenserIo wired. Call set_senser_io() first.".into())
+        })?;
+        let req = shell_request(vendor::SHELL_RMEM, &mem_read_request(addr as u32, len as u32));
+        io.bulk_out(&req)?;
+        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
+        io.bulk_in(&mut reply)?;
+        let got = u32::from_le_bytes([reply[0], reply[1], reply[2], reply[3]]) as usize;
+        let avail = got.min(vendor::SHELL_DATA_MAX);
+        if avail < len {
+            return Err(Error::Usb(format!("read_ram: short RMEM reply ({avail:#x}/{len:#x} bytes)")));
+        }
+        Ok(reply[4..4 + len].to_vec())
     }
 }
 
@@ -1104,6 +1177,98 @@ mod tests {
             (0u8, TransferType::Bulk, Direction::Out, 0x01u8),
         ];
         assert_eq!(select_bulk_pair(eps), Some((0, 0x81, 0x01)));
+    }
+
+    struct DeadPipe;
+    impl BulkPipe for DeadPipe {
+        fn write(&mut self, d: &[u8]) -> Result<usize> {
+            Ok(d.len())
+        }
+        fn read(&mut self, _b: &mut [u8]) -> Result<usize> {
+            Err(Error::Usb("no device".into()))
+        }
+    }
+
+    /// A `ServiceLink` with allow_unverified set and the given SenserIo wired,
+    /// ready to drive read_ram/upload_helper/apply_blob (keys/enter_service are
+    /// not needed by those three methods themselves - only by the gate()).
+    fn gated_link(io: MockSenserIo) -> ServiceLink<DeadPipe> {
+        let mut link = ServiceLink::new(MscBot::new(DeadPipe));
+        link.set_allow_unverified(true);
+        link.set_senser_io(Box::new(io));
+        link
+    }
+
+    #[test]
+    fn read_ram_returns_bytes_from_rmem_reply() {
+        let data = [0xAAu8, 0xBB, 0xCC, 0xDD];
+        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
+        reply[0..4].copy_from_slice(&(data.len() as u32).to_le_bytes());
+        reply[4..4 + data.len()].copy_from_slice(&data);
+        let mut link = gated_link(MockSenserIo::new(vec![reply]));
+
+        let got = link.read(0x4010_0000, data.len()).unwrap();
+        assert_eq!(got, data);
+    }
+
+    #[test]
+    fn read_ram_errors_on_short_rmem_reply() {
+        let mut reply = vec![0u8; 4 + vendor::SHELL_DATA_MAX];
+        reply[0..4].copy_from_slice(&2u32.to_le_bytes()); // claims 2 bytes, caller wants 4
+        let mut link = gated_link(MockSenserIo::new(vec![reply]));
+
+        let err = link.read(0x4010_0000, 4).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("short RMEM reply")));
+    }
+
+    #[test]
+    fn read_ram_refuses_len_over_one_transfer() {
+        let mut link = gated_link(MockSenserIo::new(vec![]));
+        let err = link.read(0x4010_0000, vendor::SHELL_DATA_MAX + 1).unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("exceeds one RMEM transfer")));
+    }
+
+    #[test]
+    fn upload_helper_sends_file_write_and_checks_response_byte() {
+        let reply = [0u8; vendor::SENSER_HEADER_LEN]; // response byte (last) = 0 -> ok
+        let mut link = gated_link(MockSenserIo::new(vec![reply.to_vec()]));
+        link.upload_helper(b"SOBYTES").unwrap();
+    }
+
+    #[test]
+    fn upload_helper_errors_on_nonzero_response_byte() {
+        let mut reply = [0u8; vendor::SENSER_HEADER_LEN];
+        reply[vendor::SENSER_HEADER_LEN - 1] = 0x7;
+        let mut link = gated_link(MockSenserIo::new(vec![reply.to_vec()]));
+        let err = link.upload_helper(b"SOBYTES").unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("response byte")));
+    }
+
+    #[test]
+    fn apply_blob_sends_all_four_frames_and_checks_shell_results() {
+        let ok4 = vec![0u8; 4]; // UsbShellResponse result=0 -> ok
+        let replies = vec![ok4.clone(), ok4.clone(), ok4.clone(), vec![b'O', b'K']];
+        let mut link = gated_link(MockSenserIo::new(replies));
+        link.apply_blob(b"BLOBDATA").unwrap();
+    }
+
+    #[test]
+    fn apply_blob_errors_when_a_shell_response_has_the_error_bit() {
+        let ok4 = vec![0u8; 4];
+        let mut bad4 = vec![0u8; 4];
+        bad4[3] = 0x80; // LE u32 0x8000_0000 -> SHELL_RESULT_ERROR_BIT set
+        let replies = vec![ok4.clone(), bad4, ok4.clone(), vec![0u8; 4]];
+        let mut link = gated_link(MockSenserIo::new(replies));
+        let err = link.apply_blob(b"BLOBDATA").unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("error bit")));
+    }
+
+    #[test]
+    fn apply_blob_errors_when_no_senser_io_wired() {
+        let mut link = ServiceLink::new(MscBot::new(DeadPipe));
+        link.set_allow_unverified(true);
+        let err = link.apply_blob(b"BLOBDATA").unwrap_err();
+        assert!(matches!(err, Error::Usb(ref s) if s.contains("no SenserIo wired")));
     }
 
     #[test]
