@@ -643,6 +643,53 @@ performs it; this MIT tool covers the read-only probe/verify on the same phone.
 
 ---
 
+## 🦀 Native rewrite — `host-injector/` (Rust) + `target-helper/` (Zig/C)
+
+A native, dependency-light rewrite of the single-session injector, alongside the
+Python tooling above (not a replacement yet — same `profiles/`, same clean-room rules):
+
+- **[`host-injector/`](host-injector/README.md)** — Rust binary (`opengate-rs`)
+  driving the USB side over [`rusb`](https://crates.io/crates/rusb): loads
+  `profiles/*.json`, builds the OGP1 patch blob, and drives the one-session state
+  machine (Mass Storage `054C:0E76` → service mode `054C:0336`) with the same
+  verify-before-write, readback, and RAII rollback as the Python path.
+- **[`target-helper/`](target-helper/README.md)** — the on-camera micro-helper, built
+  freestanding for aarch64-linux-gnu with **Zig 0.17.1** (`zig build`, bundles the
+  toolchain, no cross-gcc needed) or plain C99 (`make`, with
+  `aarch64-linux-gnu-gcc`). Applies one OGP1 record at a time: verify stock → write
+  64-byte-aligned line(s) → read back → cache flush.
+
+### CLI workflow (`host-injector`)
+
+```bash
+cd host-injector
+cargo run -- --list                                                    # list bundled profiles, no camera
+cargo run -- profile_4k_24p_stable --video-standard NTSC --dial MOVIE  # --plan (default): write plan + preflight, no camera
+cargo run -- profile_4k_24p_stable --verify-only                       # open the camera, confirm every site holds stock
+cargo run -- profile_4k_24p_stable --confirm-ram-write                 # opt-in: apply the profile (volatile RAM)
+```
+
+Entering Sony's service mode needs the Senser key tables — external MIT data, not
+shipped in this repo (see [`host-injector/README.md`](host-injector/README.md)):
+
+```bash
+cargo run -- profile_4k_24p_stable --verify-only \
+  --senser-config senser_blobs.json \   # {"sha1":[...],"sha256":[...]}, checked against cited fingerprints
+  --allow-unverified-usb                # opt-in to send real vendor frames; asks to type "yes"
+```
+
+(`--senser-config` also reads from the `OG_SENSER_CONFIG` environment variable.)
+
+**`VENDOR_PROTOCOL_VERIFIED` stays `false`** in `host-injector/src/pmca.rs`. The Senser
+auth handshake and the real-hardware re-enumeration lifecycle (`StartSenser` →
+re-enumerate as `054C:0336` → wire the senser transport) are implemented and
+unit-tested against mocks, but **not yet proven on a live A6700**. Until that flag
+flips to `true`, sending real vendor frames requires the explicit
+`--allow-unverified-usb` opt-in above plus its interactive `yes` confirm — the same
+two-gate pattern every real-hardware path in this repo uses.
+
+---
+
 ## 💬 Community & ideas
 
 Ideas for features or for cameras to support are very welcome:
@@ -664,6 +711,8 @@ Please read [`CONTRIBUTING.md`](CONTRIBUTING.md) before opening a pull request.
   panels (rear 3:2 / EVF 4:3), the L19-vs-M19 kernel-reboot diagnosis, and the
   3980-row `dmmwb` buffer calculation that opens the true 3:2 window.
 - [`profiles/README.md`](profiles/README.md) — declarative Open Gate patch-table format.
+- [`host-injector/README.md`](host-injector/README.md) / [`target-helper/README.md`](target-helper/README.md)
+  — native Rust/Zig rewrite of the single-session injector (host + on-camera helper).
 - [`docs/ROADMAP.en.md`](docs/ROADMAP.en.md) (EN) / [`docs/ROADMAP.md`](docs/ROADMAP.md) (FR)
   — milestones done and next steps (portability, Open Gate study, more bodies).
 - [`docs/RESULTS.en.md`](docs/RESULTS.en.md) (EN) / [`docs/RESULTS.md`](docs/RESULTS.md) (FR)
@@ -688,6 +737,8 @@ Sony-Alpha-OpenLab/
 ├── multi_exposure.py    # automated multi-exposure capture + optional stacking
 ├── ram_opengate.py      # volatile RAM Open Gate helper (Mass Storage, research)
 ├── opengate_inject.py   # single-session Open Gate injector (loads profiles/)
+├── host-injector/       # native rewrite, host side (Rust + rusb) + README
+├── target-helper/       # native rewrite, on-camera helper (Zig 0.17.1 / C99) + README
 ├── profiles/            # declarative Open Gate patch tables (JSON) + format README
 ├── sony_codes.py        # generated PTP code dictionaries (protocol constants)
 ├── requirements.txt   # Python dependencies (pyusb; pillow/numpy optional)
