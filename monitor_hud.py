@@ -310,13 +310,30 @@ def _draw_menu(frame, visible_h_menu, active_mode):
         ("2", "4K Open Gate 3:2 (3840x2560)", MODE_OPEN_GATE),
         ("3", "Live Ghosting / Multi-Exp.", MODE_GHOST),
     ]
-    y = 12
+    pad = 8
+    line_h = 26
+    font, scale, thickness = cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1
+    texts = [f"[{key}] {label}" for key, label, _ in pills]
+    max_w = max(cv2.getTextSize(t, font, scale, thickness)[0][0] for t in texts)
+
+    h, w = frame.shape[:2]
+    x1, y1 = 12, 12
+    x2 = min(w, x1 + max_w + pad * 2)
+    y2 = min(h, y1 + len(pills) * line_h + pad)
+
+    # Same dark semi-transparent backing as the status pill, so the menu text
+    # stays crisp over bright/white backgrounds (e.g. the --demo color bars)
+    # instead of just floating unreadably on top of them.
+    overlay = frame[y1:y2, x1:x2].copy()
+    cv2.rectangle(frame, (x1, y1), (x2, y2), (24, 24, 24), -1)
+    cv2.addWeighted(frame[y1:y2, x1:x2], 0.85, overlay, 0.15, 0, frame[y1:y2, x1:x2])
+
+    y = y1
     for key, label, mode in pills:
         text = f"[{key}] {label}"
         color = (0, 255, 0) if mode == active_mode else (220, 220, 220)
-        cv2.putText(frame, text, (12, y + 18), cv2.FONT_HERSHEY_SIMPLEX,
-                    0.5, color, 1, cv2.LINE_AA)
-        y += 26
+        cv2.putText(frame, text, (x1 + pad, y + 18), font, scale, color, thickness, cv2.LINE_AA)
+        y += line_h
 
 
 # ---------------------------------------------------------------------------
