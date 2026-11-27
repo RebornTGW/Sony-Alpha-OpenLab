@@ -7,7 +7,7 @@ use std::process::ExitCode;
 
 use opengate_rs::inject::{apply_profile, plan, preflight, verify_stock, Dial, VideoStd};
 use opengate_rs::profile::Profile;
-use opengate_rs::usb::UsbSession;
+use opengate_rs::usb::open_a6700;
 
 fn usage() {
     eprintln!(
@@ -120,23 +120,53 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
-    // Camera path: detect MSC -> service mode -> verify / apply.
-    let mut sess = match UsbSession::detect() {
-        Ok(s) => s,
+    // Camera path: open MSC -> probe (read-only) -> service mode -> verify / apply,
+    // all on one held session.
+    let mut link = match open_a6700() {
+        Ok(l) => l,
         Err(e) => {
             eprintln!("[ERROR] {e}");
             return ExitCode::FAILURE;
         }
     };
-    if let Err(e) = sess.enter_service() {
+    if let Err(e) = link.probe() {
+        eprintln!("[ERROR] probe: {e}");
+        return ExitCode::FAILURE;
+    }
+    if let Err(e) = link.enter_service() {
         eprintln!("[ERROR] {e}");
         return ExitCode::FAILURE;
     }
 
+    // A write chain needs the on-camera helper loaded first.
+    if confirm {
+        match find_helper_so() {
+            Some(path) => match std::fs::read(&path) {
+                Ok(bytes) => {
+                    if let Err(e) = link.upload_helper(&bytes) {
+                        eprintln!("[ERROR] upload helper: {e}");
+                        return ExitCode::FAILURE;
+                    }
+                    println!("[+] uploaded helper {} ({} bytes)", path.display(), bytes.len());
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] read {}: {e}", path.display());
+                    return ExitCode::FAILURE;
+                }
+            },
+            None => {
+                eprintln!(
+                    "[ERROR] libogpatch.so not found. Build it: cd ../target-helper && zig build"
+                );
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+
     let res = if confirm {
-        apply_profile(&prof, &mut sess).map(|n| println!("[+] applied {n} writes (volatile)."))
+        apply_profile(&prof, &mut link).map(|n| println!("[+] applied {n} writes (volatile)."))
     } else {
-        verify_stock(&prof, &mut sess).map(|_| println!("[verify] all sites stock."))
+        verify_stock(&prof, &mut link).map(|_| println!("[verify] all sites stock."))
     };
     match res {
         Ok(()) => ExitCode::SUCCESS,
@@ -145,6 +175,16 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Look for the compiled aarch64 helper in the usual build output locations.
+fn find_helper_so() -> Option<PathBuf> {
+    let candidates = [
+        "../target-helper/zig-out/lib/libogpatch.so",
+        "../target-helper/build/libogpatch.so",
+        "target-helper/zig-out/lib/libogpatch.so",
+    ];
+    candidates.iter().map(PathBuf::from).find(|p| p.is_file())
 }
 
 fn list_profiles(dir: &std::path::Path) -> opengate_rs::Result<()> {

@@ -30,9 +30,10 @@ verify stock  ->  write 64-byte-aligned line(s)  ->  read back  ->  flush cache
 make                      # -> build/libogpatch.so   (needs aarch64-linux-gnu-gcc)
 
 # aarch64 .so via Zig (bundles the toolchain; no cross-gcc needed)
-zig build                 # -> zig-out/lib/libogpatch.so   (Zig 0.13/0.14)
+zig build                 # -> zig-out/lib/libogpatch.so   (Zig 0.17.1)
+zig build test            # builds + runs test/test_helper.c on the host
 
-# host logic self-test (any native C compiler, no aarch64, no camera)
+# host logic self-test via Make (any native C compiler, no aarch64, no camera)
 make test                 # builds + runs build/test_helper  -> "OK"
 ```
 

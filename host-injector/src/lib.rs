@@ -10,14 +10,19 @@
 
 pub mod descriptor;
 pub mod inject;
+pub mod pmca;
 pub mod profile;
+pub mod scsi;
 pub mod transport;
 pub mod usb;
 
 pub use descriptor::{build_blob, PatchRecord};
 pub use inject::{apply_profile, plan, preflight, verify_stock, Dial, PreflightItem, VideoStd};
+pub use pmca::ServiceLink;
 pub use profile::{Profile, Write};
+pub use scsi::{BulkPipe, MscBot};
 pub use transport::{NullTransport, RamTransport};
+pub use usb::open_a6700;
 
 /// Common result type for the crate's application logic.
 pub type Result<T> = std::result::Result<T, Error>;
